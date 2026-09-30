@@ -1,0 +1,32 @@
+server:
+  port: 8082
+spring:
+  application:
+    name: notification-service
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${JWT_ISSUER_URI:http://localhost:8180/realms/room-care}
+          jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8180/realms/room-care/protocol/openid-connect/certs}
+security:
+  data-encryption-key-base64: ${DATA_ENCRYPTION_KEY_BASE64}
+firebase:
+  credentials-path: ${FIREBASE_CREDENTIALS_PATH:}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+logging:
+  pattern:
+    console: '{"time":"%d{yyyy-MM-dd''T''HH:mm:ss.SSSXXX}","level":"%p","service":"notification-service","trace":"%X{traceId:-}","message":"%replace(%m){''"'',''\"''}"}%n'
+

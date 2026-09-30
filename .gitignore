@@ -1,0 +1,6 @@
+.env
+target/
+secrets/
+infra/nginx/certs/*.pem
+!.gitkeep
+

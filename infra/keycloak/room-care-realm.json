@@ -1,0 +1,39 @@
+{
+  "realm": "room-care",
+  "enabled": true,
+  "registrationAllowed": false,
+  "roles": {
+    "realm": [
+      {"name": "USER"},
+      {"name": "ADMIN"}
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "room-care-web",
+      "name": "Room Care Web",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"],
+      "attributes": {"pkce.code.challenge.method": "S256"},
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ]
+}
+
