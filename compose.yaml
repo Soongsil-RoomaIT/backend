@@ -96,7 +96,6 @@ services:
       - "9090:9090"
     depends_on:
       - gateway-service
-      - notification-service
 
   tls-proxy:
     image: nginx:1.27-alpine

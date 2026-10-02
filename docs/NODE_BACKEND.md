@@ -8,6 +8,7 @@ SAD는 v1.1을 유지하고 작업 브랜치는 minjae입니다.
 
 `.env.example`을 `.env`로 복사하고 비밀번호와 암호화 키를 설정한 뒤 실행합니다.
 암호화 키는 32바이트 무작위 값의 Base64입니다.
+`node node-service/scripts/setup-env.js`로 기존 .env를 유지하면서 무작위 로컬 키와 비밀번호를 생성할 수도 있습니다.
 
 ```powershell
 [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
@@ -20,6 +21,8 @@ Gateway 8080, Keycloak 8180, Prometheus 9090을 사용합니다.
 이때 `REDIS_URL=redis://localhost:6379`, `CLOUD_SERVICE_URL=http://localhost:8081`과
 `DATA_ENCRYPTION_KEY_BASE64`를 환경 변수로 지정합니다. 검증은 `npm test`입니다.
 사용하지 않는 선택 의존성인 Firebase Firestore/Storage는 설치에서 제외합니다.
+Docker 실행 후 `node node-service/scripts/smoke-docker.js`는 실제 Keycloak/Redis/Gateway를 검증합니다.
+임시 서비스 계정을 만들고 종료 시 제거하며, 실제 FCM 전송 없이 개발용 알림 이력을 남깁니다.
 
 ## C 서버의 계약
 
