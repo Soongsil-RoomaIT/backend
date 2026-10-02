@@ -16,10 +16,16 @@
       "publicClient": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
-      "redirectUris": ["http://localhost:3000/*"],
-      "webOrigins": ["http://localhost:3000"],
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
       "attributes": {"pkce.code.challenge.method": "S256"},
       "protocolMappers": [
+        {
+          "name": "API audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {"included.custom.audience": "room-care-api", "access.token.claim": "true", "id.token.claim": "false"}
+        },
         {
           "name": "realm roles",
           "protocol": "openid-connect",

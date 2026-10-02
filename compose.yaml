@@ -45,6 +45,7 @@ services:
         condition: service_healthy
 
   notification-service:
+    profiles: ["legacy-java"]
     build: ./notification-service
     environment:
       REDIS_HOST: redis
@@ -63,17 +64,28 @@ services:
         condition: service_started
 
   gateway-service:
-    build: ./gateway-service
+    build: ./node-service
     environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      REDIS_URL: redis://redis:6379
+      DATA_ENCRYPTION_KEY_BASE64: ${DATA_ENCRYPTION_KEY_BASE64}
+      JWT_AUDIENCE: room-care-api
       JWT_ISSUER_URI: http://localhost:8180/realms/room-care
       JWT_JWK_SET_URI: http://keycloak:8080/realms/room-care/protocol/openid-connect/certs
       CLOUD_SERVICE_URL: ${CLOUD_SERVICE_URL:-http://host.docker.internal:8081}
-      NOTIFICATION_SERVICE_URL: http://notification-service:8082
+      FCM_ENABLED: ${FCM_ENABLED:-false}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase-service-account.json
+    volumes:
+      - ./secrets:/run/secrets:ro
     ports:
       - "8080:8080"
     depends_on:
-      - keycloak
-      - notification-service
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
 
   prometheus:
     image: prom/prometheus:v2.55.1
