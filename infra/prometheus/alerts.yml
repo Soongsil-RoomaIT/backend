@@ -1,0 +1,42 @@
+# Prometheus UI(Alerts 탭)와 Grafana에서 확인합니다. 외부 통지는 Alertmanager 연결 시 추가합니다.
+groups:
+  - name: room-care-gateway
+    rules:
+      - alert: GatewayDown
+        expr: up{job="gateway-service"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: Gateway 지표 수집 실패
+          description: gateway-service가 1분 이상 /actuator/prometheus에 응답하지 않습니다.
+      - alert: GatewayHighErrorRate
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{job="gateway-service",status_code=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_server_request_duration_seconds_count{job="gateway-service"}[5m])), 1e-9) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Gateway 5xx 비율 5% 초과
+          description: 최근 5분 Gateway 응답의 5% 이상이 5xx입니다. C 서버 연결(502) 또는 Redis 오류(503)를 확인하세요.
+      - alert: CloudServerUnreachable
+        expr: sum(increase(gateway_cloud_upstream_failures_total[5m])) > 10
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: C Cloud Server 연결 실패 반복
+          description: 최근 5분간 C 서버 REST/WS 연결 실패가 10회를 넘었습니다. CLOUD_SERVICE_URL과 C 서버 상태를 확인하세요.
+      - alert: NotificationDeliveryFailures
+        expr: sum(increase(gateway_notifications_total{status=~"error|partial-failure"}[15m])) > 0
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: 푸시 알림 발송 실패 발생
+          description: 최근 15분 안에 알림 발송 오류 또는 일부 실패가 있었습니다.
+      - alert: GatewaySlowResponses
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job="gateway-service",route!="/actuator/prometheus"}[5m]))) > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Gateway p95 응답 1초 초과
+          description: 10분 이상 p95 응답 시간이 1초를 넘었습니다.

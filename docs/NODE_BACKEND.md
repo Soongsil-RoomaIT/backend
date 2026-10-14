@@ -65,7 +65,43 @@ Keycloak room-care realm의 room-care-web은 PKCE(S256), localhost:5173 redirect
 room-care-api audience를 사용합니다. 사용자와 역할은 Keycloak에서 등록합니다.
 기존 realm이 있는 볼륨은 import가 덮어쓰지 않으므로 5173 주소와 audience mapper를 관리 화면에서 반영합니다.
 REST는 Authorization: Bearer JWT이며 RS256 서명, issuer, audience, exp, sub를 검증합니다.
-서비스용 client credentials 클라이언트는 배포 시 별도로 등록해야 합니다.
+
+## 내부 서비스 알림 호출 (client credentials)
+
+C 서버 같은 내부 서비스는 사용자 토큰이나 ADMIN 계정 대신 realm에 포함된
+`room-care-automation` 기밀 클라이언트로 토큰을 받아 알림을 보냅니다.
+
+- 서비스 계정 역할은 `NOTIFICATION_SENDER` 하나이며 `fullScopeAllowed=false`라 토큰에도 이 역할만 담깁니다.
+- 토큰 audience는 room-care-api, 수명은 5분입니다. 브라우저 로그인·비밀번호 grant는 꺼져 있습니다.
+- Gateway의 POST /api/notifications/send는 `ADMIN` 또는 `NOTIFICATION_SENDER`를 허용합니다.
+- 비밀값은 `.env`의 `AUTOMATION_CLIENT_SECRET`이며 Keycloak이 import 시 `${AUTOMATION_CLIENT_SECRET}`을 치환합니다.
+  C 담당자에게는 Secret Manager 등으로만 전달하고 저장소·로그에 남기지 않습니다.
+
+```bash
+# 1) 토큰 발급 (C 서버에서 만료 전 재발급·캐시)
+curl -s -d grant_type=client_credentials -d client_id=room-care-automation \
+  -d client_secret="$AUTOMATION_CLIENT_SECRET" \
+  http://keycloak:8080/realms/room-care/protocol/openid-connect/token
+# 2) 알림 발송: eventId는 자동화 판단 ID처럼 재시도해도 같은 값을 사용
+curl -X POST http://gateway-service:8080/api/notifications/send \
+  -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"eventId":"automation-123","userId":"Keycloak subject","title":"자동 제어 완료","body":"제습기를 켰습니다"}'
+```
+
+토큰 발급 주소의 호스트는 issuer 검증과 무관하게 Keycloak에 닿기만 하면 되지만,
+발급된 토큰의 iss는 `KC_HOSTNAME`(http://localhost:8180) 기준이므로 Gateway 설정과 맞아야 합니다.
+
+기존 `.env`에는 `node node-service/scripts/setup-env.js`를 다시 실행하면 새 키만 추가됩니다.
+이미 생성된 Keycloak 볼륨은 realm import를 다시 적용하지 않으므로 둘 중 하나를 합니다.
+
+- 개발 데이터 초기화: `docker compose down` 후 `docker volume rm <프로젝트>_postgres-data`, 다시 `up`
+  (Keycloak에 수동으로 만든 사용자도 삭제됩니다.)
+- 볼륨 유지: 관리 화면 room-care realm에 `NOTIFICATION_SENDER` 역할과 `room-care-automation` 클라이언트
+  (Client authentication ON, Service accounts roles만 ON, Full scope allowed OFF, Scope에 NOTIFICATION_SENDER,
+  room-care-api audience·roles 매퍼)를 만들고 Service account roles에 NOTIFICATION_SENDER를 부여한 뒤
+  Credentials 탭의 비밀값을 `.env`의 AUTOMATION_CLIENT_SECRET에 넣습니다.
+
+`smoke-docker.js`는 이 클라이언트로 실제 발송까지 검증하며, 클라이언트가 없으면 SKIP을 출력합니다.
 
 현재 인증 없는 프론트 모니터링을 붙이려면 개발 환경에만 아래를 설정합니다.
 
@@ -112,7 +148,46 @@ userId + eventId 기준 NX/24시간 TTL 중복 방지, 중복 요청은 duplicat
 `docker compose --profile tls up --build`로 TLS 1.3 및 WS upgrade 프록시를 실행합니다.
 운영 Origin은 CORS_ORIGINS에 명시하고 내부 서비스는 직접 외부에 노출하지 않습니다.
 운영 키는 Secret Manager로 관리합니다.
-/actuator/health는 프로세스 생존 확인, /actuator/prometheus는 Node.js 프로세스 지표입니다.
-Redis와 C 서버 준비 상태를 보장하는 readiness 검사는 아닙니다.
-JSON 로그는 requestId/메서드/상태/소요 시간만 기록하며 토큰과 본문은 기록하지 않습니다.
+/actuator/health는 프로세스 생존 확인이며 Redis와 C 서버 준비 상태를 보장하는 readiness 검사는 아닙니다.
+JSON 로그는 requestId/메서드/경로 라벨/상태/소요 시간만 기록하며 토큰과 본문은 기록하지 않습니다.
+
+### 지표
+
+/actuator/prometheus는 Node.js 기본 지표와 아래 Gateway 지표를 제공합니다.
+경로 라벨은 알려진 경로(/api/sensors, /api/devices, /api/edge, /api/notifications/send 등)와 /api/other로 제한해
+임의 URL이 시계열을 늘리지 못하게 합니다.
+
+| 지표 | 라벨 | 의미 |
+| --- | --- | --- |
+| http_server_request_duration_seconds | method, route, status_code | HTTP 응답 시간 히스토그램 |
+| gateway_websocket_clients | - | 현재 브라우저 WebSocket 연결 수 |
+| gateway_cloud_upstream_failures_total | transport(rest/ws) | C 서버 연결 실패 |
+| gateway_notifications_total | status | sent/dry-run/duplicate/partial-failure/no-targets/error |
+
+Prometheus는 `infra/prometheus/alerts.yml`의 GatewayDown, GatewayHighErrorRate(5xx 5% 초과),
+CloudServerUnreachable, NotificationDeliveryFailures, GatewaySlowResponses(p95 1초 초과) 규칙을 평가합니다.
+외부 통지(메일·Slack)는 Alertmanager를 붙일 때 추가합니다.
+
+### Grafana/Loki
+
+```powershell
+docker compose --profile observability up --build
+```
+
+- Grafana: http://localhost:3000 (admin / `.env`의 GRAFANA_ADMIN_PASSWORD), Room Care 폴더의 Room Care Gateway 대시보드
+- Prometheus·Loki 데이터소스와 대시보드는 `infra/grafana`에서 자동 프로비저닝되며 UI 수정은 저장되지 않습니다.
+- Grafana Alloy가 Docker 소켓으로 Compose 컨테이너 로그를 수집해 Loki로 보냅니다.
+  라벨은 service/project/stream과 Gateway 로그의 level뿐입니다. Explore에서 `{service="gateway-service"}`로 조회합니다.
+- Grafana(3000)와 Loki(3100)는 127.0.0.1에만 바인딩합니다.
+
+보존 정책
+
+| 대상 | 보존 | 설정 위치 |
+| --- | --- | --- |
+| 컨테이너 원본 로그 | 서비스당 10MB x 3파일 | compose.yaml `x-logging` |
+| Loki 로그 | 7일(168h), compactor가 삭제 | infra/loki/loki.yml |
+| Prometheus 지표 | 15일 또는 2GB 중 먼저 도달 | compose.yaml prometheus command |
+
+Alloy의 Docker 소켓 마운트는 개발용입니다. 운영에서는 클라우드 로깅 에이전트 또는 노드 단위 수집기로 대체하고
+보존 기간은 개인정보 처리 방침에 맞춰 조정합니다.
 PostgreSQL은 Keycloak 저장소입니다. C 데이터 스키마와 개인정보 컬럼 암호화는 C 담당과 연동합니다.

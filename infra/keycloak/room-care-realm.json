@@ -4,8 +4,16 @@
   "registrationAllowed": false,
   "roles": {
     "realm": [
-      {"name": "USER"},
-      {"name": "ADMIN"}
+      {
+        "name": "USER"
+      },
+      {
+        "name": "ADMIN"
+      },
+      {
+        "name": "NOTIFICATION_SENDER",
+        "description": "Internal services allowed to call POST /api/notifications/send"
+      }
     ]
   },
   "clients": [
@@ -16,15 +24,67 @@
       "publicClient": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
-      "redirectUris": ["http://localhost:5173/*"],
-      "webOrigins": ["http://localhost:5173"],
-      "attributes": {"pkce.code.challenge.method": "S256"},
+      "redirectUris": [
+        "http://localhost:5173/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5173"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
       "protocolMappers": [
         {
           "name": "API audience",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",
-          "config": {"included.custom.audience": "room-care-api", "access.token.claim": "true", "id.token.claim": "false"}
+          "config": {
+            "included.custom.audience": "room-care-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "room-care-automation",
+      "name": "Room Care internal automation (client credentials)",
+      "description": "C 서버 등 내부 서비스가 알림 발송 API를 호출할 때 사용하는 서비스 계정",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${AUTOMATION_CLIENT_SECRET}",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": false,
+      "attributes": {
+        "access.token.lifespan": "300"
+      },
+      "protocolMappers": [
+        {
+          "name": "API audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "room-care-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
         },
         {
           "name": "realm roles",
@@ -40,6 +100,23 @@
         }
       ]
     }
+  ],
+  "users": [
+    {
+      "username": "service-account-room-care-automation",
+      "enabled": true,
+      "serviceAccountClientId": "room-care-automation",
+      "realmRoles": [
+        "NOTIFICATION_SENDER"
+      ]
+    }
+  ],
+  "scopeMappings": [
+    {
+      "client": "room-care-automation",
+      "roles": [
+        "NOTIFICATION_SENDER"
+      ]
+    }
   ]
 }
-

@@ -66,8 +66,12 @@ docker compose --profile tls up --build
 
 ## 다음 연동 지점
 
-- C 역할의 Cloud Server 주소를 `CLOUD_SERVICE_URL`에 연결
-- E 역할의 Web App에 Keycloak Authorization Code + PKCE 로그인 적용
-- 내부 서비스가 알림을 호출할 수 있도록 client credentials 클라이언트 분리
-- Grafana/Loki 또는 클라우드 모니터링으로 대시보드와 로그 보존 정책 추가
+- [ ] C 역할의 Cloud Server 주소를 `CLOUD_SERVICE_URL`에 연결
+- [ ] E 역할의 Web App에 Keycloak Authorization Code + PKCE 로그인 적용
+- [x] 내부 서비스가 알림을 호출할 수 있도록 client credentials 클라이언트 분리
+  — realm의 `room-care-automation` + `NOTIFICATION_SENDER` 역할 ([가이드](docs/NODE_BACKEND.md#내부-서비스-알림-호출-client-credentials))
+- [x] Grafana/Loki 대시보드와 로그 보존 정책 추가
+  — `docker compose --profile observability up`, Loki 7일·Prometheus 15일 보존 ([가이드](docs/NODE_BACKEND.md#grafanaloki))
+- [ ] C 담당에 `AUTOMATION_CLIENT_SECRET` 전달 및 자동화 이벤트에서 알림 API 호출 연동
+- [ ] Alertmanager 연결로 경보 외부 통지, Redis·C 서버 readiness 검사 추가
 
