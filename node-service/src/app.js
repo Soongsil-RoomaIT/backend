@@ -4,15 +4,49 @@ import { rateLimit } from 'express-rate-limit';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
+import { Counter, Gauge, Histogram } from 'prom-client';
 import { bearer } from './security.js';
 
+// Roles allowed to call POST /api/notifications/send. NOTIFICATION_SENDER is granted only to the
+// room-care-automation client-credentials service account (see infra/keycloak/room-care-realm.json).
+export const SENDER_ROLES = ['ADMIN', 'NOTIFICATION_SENDER'];
+const API_SEGMENTS = new Set(['sensors', 'devices', 'edge', 'forecast', 'decisions', 'settings']);
+const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
+
+// Bounded route label so arbitrary request paths cannot explode Prometheus cardinality.
+export function routeLabel(path) {
+  if (['/actuator/health', '/actuator/prometheus', '/ws', '/api/push/token', '/api/notifications', '/api/notifications/send'].includes(path)) return path;
+  const match = /^\/api\/([^/]+)/.exec(path);
+  if (!match) return 'other';
+  return API_SEGMENTS.has(match[1]) ? `/api/${match[1]}` : '/api/other';
+}
+
+function createMetrics(registry) {
+  const registers = [registry];
+  return {
+    http: new Histogram({name: 'http_server_request_duration_seconds', help: 'Gateway HTTP request duration',
+      labelNames: ['method', 'route', 'status_code'], buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5], registers}),
+    wsClients: new Gauge({name: 'gateway_websocket_clients', help: 'Open browser WebSocket connections', registers}),
+    upstreamFailures: new Counter({name: 'gateway_cloud_upstream_failures_total', help: 'Failed calls to the C cloud server',
+      labelNames: ['transport'], registers}),
+    notifications: new Counter({name: 'gateway_notifications_total', help: 'Notification send results by status',
+      labelNames: ['status'], registers})
+  };
+}
+
 export function createApp({config, verify, notifications, logger, registry}) {
+  const metrics = createMetrics(registry);
   const app = express();
   app.disable('x-powered-by');
   app.use((req, res, next) => {
     req.id = randomUUID(); res.set('X-Request-Id', req.id);
-    const start = Date.now();
-    res.on('finish', () => logger.info({requestId: req.id, method: req.method, status: res.statusCode, durationMs: Date.now()-start}, 'HTTP request'));
+    const start = process.hrtime.bigint();
+    res.on('finish', () => {
+      const seconds = Number(process.hrtime.bigint() - start) / 1e9;
+      const route = req.route?.path ? (req.baseUrl ?? '') + req.route.path : routeLabel(req.originalUrl.split('?')[0]);
+      metrics.http.observe({method: METHODS.has(req.method) ? req.method : 'OTHER', route, status_code: String(res.statusCode)}, seconds);
+      logger.info({requestId: req.id, method: req.method, route, status: res.statusCode, durationMs: Math.round(seconds*1000)}, 'HTTP request');
+    });
     next();
   });
   app.use(cors({origin: config.origins, credentials: true}));
@@ -38,13 +72,17 @@ export function createApp({config, verify, notifications, logger, registry}) {
   app.get('/api/notifications', async (req, res) => res.json(await notifications.list(req.user.sub)));
   app.post('/api/notifications/send', async (req, res) => {
     const roles = req.user.roles ?? req.user.realm_access?.roles ?? [];
-    if (!roles.includes('ADMIN')) return res.status(403).json({message: 'ADMIN role required'});
+    if (!SENDER_ROLES.some(role => roles.includes(role))) return res.status(403).json({message: 'ADMIN or NOTIFICATION_SENDER role required'});
     const event = req.body;
     if (!event || ['eventId','userId','title','body'].some(key => typeof event[key] !== 'string' || !event[key].trim() || event[key].length > 4096)
       || (event.data !== undefined && (event.data === null || Array.isArray(event.data) || typeof event.data !== 'object' || Object.values(event.data).some(v => typeof v !== 'string')))) {
       return res.status(400).json({message: 'Invalid notification event'});
     }
-    res.json(await notifications.send(event));
+    let result;
+    try { result = await notifications.send(event); }
+    catch (error) { metrics.notifications.inc({status: 'error'}); throw error; }
+    metrics.notifications.inc({status: result.status});
+    res.json(result);
   });
   app.use('/api', async (req, res) => {
     if (!['GET','POST','PUT','PATCH','DELETE'].includes(req.method)) return res.sendStatus(405);
@@ -63,7 +101,10 @@ export function createApp({config, verify, notifications, logger, registry}) {
       res.status(response.status);
       if (response.headers.get('content-type')) res.set('Content-Type', response.headers.get('content-type'));
       res.send(Buffer.from(await response.arrayBuffer()));
-    } catch { res.status(502).json({message: 'Cloud service unavailable', requestId: req.id}); }
+    } catch {
+      metrics.upstreamFailures.inc({transport: 'rest'});
+      res.status(502).json({message: 'Cloud service unavailable', requestId: req.id});
+    }
   });
   app.use((_req, res) => res.sendStatus(404));
   app.use((err, req, res, _next) => {
@@ -80,7 +121,8 @@ export function createApp({config, verify, notifications, logger, registry}) {
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
   });
   wss.on('connection', client => {
-    let upstream, heartbeat, expiry, started = false;
+    metrics.wsClients.inc();
+    let upstream, heartbeat, expiry, started = false, authenticated = false;
     const authTimeout = setTimeout(() => client.close(1008, 'Authentication timeout'), 5000);
     const send = value => { if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(value)); };
     const start = async token => {
@@ -88,6 +130,7 @@ export function createApp({config, verify, notifications, logger, registry}) {
       started = true;
       try {
         const user = await verify(token);
+        authenticated = true;
         clearTimeout(authTimeout);
         expiry = setTimeout(() => client.close(1008, 'Token expired'), Math.min((user.exp*1000-Date.now()), 2147483647));
         const headers = token ? {authorization: `Bearer ${token}`} : {};
@@ -107,9 +150,12 @@ export function createApp({config, verify, notifications, logger, registry}) {
             if (['edge.status','sensor.update','device.state','edge.recovered','command.ack'].includes(message.type)) client.send(data.toString());
           } catch { /* Ignore malformed upstream frames. */ }
         });
-        upstream.on('error', () => client.close(1011, 'Cloud WebSocket unavailable'));
+        upstream.on('error', () => { metrics.upstreamFailures.inc({transport: 'ws'}); client.close(1011, 'Cloud WebSocket unavailable'); });
         upstream.on('close', () => client.close(1011, 'Cloud WebSocket disconnected'));
-      } catch { client.close(1011, 'Authentication or cloud connection failed'); }
+      } catch {
+        if (authenticated) metrics.upstreamFailures.inc({transport: 'ws'});
+        client.close(1011, 'Authentication or cloud connection failed');
+      }
     };
     client.on('message', (raw, binary) => {
       if (binary) return;
@@ -121,6 +167,7 @@ export function createApp({config, verify, notifications, logger, registry}) {
     });
     client.on('error', () => client.close());
     client.on('close', () => {
+      metrics.wsClients.dec();
       clearTimeout(authTimeout); clearTimeout(expiry); clearInterval(heartbeat);
       upstream?.close();
     });

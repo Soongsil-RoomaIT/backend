@@ -144,3 +144,44 @@ test('notifications encrypt tokens, isolate users, deduplicate and release faile
   fail=true;await assert.rejects(service.send({...event,eventId:'retry'}));
   fail=false;assert.equal((await service.send({...event,eventId:'retry'})).status,'sent');
 });
+
+test('client-credentials NOTIFICATION_SENDER may send; metrics use bounded labels', async t => {
+  const tokens={'sender-token':['NOTIFICATION_SENDER'],'user-token':['USER']};
+  const verify=async token=>{if(!tokens[token])throw Error('bad token');return{sub:'svc',roles:tokens[token],exp:Math.floor(Date.now()/1000)+60};};
+  let fail=false;
+  const notifications={send:async event=>{if(fail)throw Error('redis');return{eventId:event.eventId,status:'dry-run'};}};
+  const registry=new Registry();
+  const {server,wss}=createApp({config:{...config,devAuth:false,cloud:'http://127.0.0.1:9'},verify,notifications,logger,registry});
+  const base=await listen(server); t.after(()=>{wss.close();close(server);});
+  const event={eventId:'automation-1',userId:'user-1',title:'자동 제어 완료',body:'제습기를 켰습니다'};
+  const post=(token,body)=>fetch(base+'/api/notifications/send',{method:'POST',headers:{Authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify(body)});
+  assert.equal((await post('user-token',event)).status,403);
+  const sent=await post('sender-token',event);
+  assert.equal(sent.status,200); assert.equal((await sent.json()).status,'dry-run');
+  fail=true; assert.equal((await post('sender-token',{...event,eventId:'automation-2'})).status,503);
+  assert.equal((await fetch(base+'/api/edge/status',{headers:{Authorization:'Bearer user-token'}})).status,502);
+  await fetch(base+'/api/random-'+Math.random(),{headers:{Authorization:'Bearer user-token'}});
+  assert.equal((await fetch(base+'/api/notifications/send',{method:'POST'})).status,401);
+  const text=await (await fetch(base+'/actuator/prometheus')).text();
+  assert.match(text,/gateway_notifications_total\{status="dry-run"\} 1/);
+  assert.match(text,/gateway_notifications_total\{status="error"\} 1/);
+  assert.match(text,/gateway_cloud_upstream_failures_total\{transport="rest"\} 2/);
+  assert.match(text,/http_server_request_duration_seconds_count\{method="POST",route="\/api\/notifications\/send",status_code="200"\} 1/);
+  assert.match(text,/route="\/api\/edge",status_code="502"/);
+  assert.match(text,/route="\/api\/other"/);
+  assert.match(text,/method="POST",route="\/api\/notifications\/send",status_code="401"/);
+  assert.doesNotMatch(text,/random-/);
+  assert.match(text,/gateway_websocket_clients 0/);
+});
+
+test('realm grants NOTIFICATION_SENDER only to the automation service account', async () => {
+  const {readFile}=await import('node:fs/promises');
+  const realm=JSON.parse(await readFile(new URL('../../infra/keycloak/room-care-realm.json',import.meta.url),'utf8'));
+  const client=realm.clients.find(c=>c.clientId==='room-care-automation');
+  assert.ok(client.serviceAccountsEnabled && !client.publicClient && !client.standardFlowEnabled && !client.directAccessGrantsEnabled);
+  assert.equal(client.secret,'${AUTOMATION_CLIENT_SECRET}');
+  assert.equal(client.fullScopeAllowed,false);
+  assert.ok(client.protocolMappers.some(m=>m.config['included.custom.audience']==='room-care-api'));
+  assert.deepEqual(realm.users.find(u=>u.serviceAccountClientId==='room-care-automation').realmRoles,['NOTIFICATION_SENDER']);
+  assert.ok(!realm.clients.find(c=>c.clientId==='room-care-web').serviceAccountsEnabled);
+});

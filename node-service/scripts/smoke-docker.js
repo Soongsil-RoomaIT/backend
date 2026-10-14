@@ -54,8 +54,25 @@ try {
   assert.equal(history.length,1);assert.equal(history[0].id,event.eventId);
   await call(`${gateway}/api/push/token`,{token:access,method:'DELETE',expected:204,body:{token:'local-smoke-not-a-real-fcm-token'}});
   console.log('PASS Redis-backed token registration, ADMIN dry-run, deduplication, history and removal');
+  // Realm-provisioned client-credentials account for internal services (C server automation).
+  const automation=await fetch(`${auth}/realms/room-care/protocol/openid-connect/token`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({grant_type:'client_credentials',client_id:'room-care-automation',client_secret:env.AUTOMATION_CLIENT_SECRET??''}),signal:AbortSignal.timeout(10000)});
+  if(automation.ok){
+    const serviceToken=(await automation.json()).access_token;
+    const claims=JSON.parse(Buffer.from(serviceToken.split('.')[1],'base64url').toString());
+    assert.deepEqual(claims.roles,['NOTIFICATION_SENDER']);
+    const automated=await call(`${gateway}/api/notifications/send`,{token:serviceToken,method:'POST',body:{...event,eventId:`smoke-automation-${randomUUID()}`}});
+    assert.equal(automated.status,'dry-run');
+    console.log('PASS room-care-automation client credentials with NOTIFICATION_SENDER only');
+  } else {
+    console.log('SKIP room-care-automation: realm volume predates the client or AUTOMATION_CLIENT_SECRET differs (see docs/NODE_BACKEND.md)');
+  }
   const health=await call(`${gateway}/actuator/health`);assert.equal(health.status,'UP');
-  const metrics=await fetch(`${gateway}/actuator/prometheus`);assert.equal(metrics.status,200);assert.ok((await metrics.text()).includes('process_cpu'));
+  const metrics=await fetch(`${gateway}/actuator/prometheus`);assert.equal(metrics.status,200);
+  const metricsText=await metrics.text();
+  assert.ok(metricsText.includes('process_cpu'));
+  assert.ok(metricsText.includes('http_server_request_duration_seconds_bucket'));
+  assert.ok(metricsText.includes('gateway_notifications_total{status="dry-run"}'));
   console.log('PASS health and Prometheus metrics');
 } finally {
   if(clientUuid&&adminToken){await call(`${adminPath}/clients/${clientUuid}`,{token:adminToken,method:'DELETE',expected:204});console.log('Removed temporary Keycloak smoke-test client');}

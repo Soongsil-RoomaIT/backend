@@ -1,5 +1,14 @@
+# 모든 컨테이너 로그는 json-file 드라이버로 10MB x 3개까지만 보관합니다(디스크 보호).
+# 장기 로그 조회·보존은 observability 프로필의 Loki(7일)를 사용합니다.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
+    logging: *default-logging
     image: postgres:15-alpine
     environment:
       POSTGRES_DB: keycloak
@@ -14,6 +23,7 @@ services:
       retries: 20
 
   redis:
+    logging: *default-logging
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
@@ -25,6 +35,7 @@ services:
       retries: 20
 
   keycloak:
+    logging: *default-logging
     image: quay.io/keycloak/keycloak:26.0
     command: ["start-dev", "--import-realm"]
     environment:
@@ -36,6 +47,8 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       KC_HEALTH_ENABLED: "true"
       KC_HOSTNAME: http://localhost:8180
+      # realm import 파일의 ${AUTOMATION_CLIENT_SECRET} 자리표시자를 채웁니다.
+      AUTOMATION_CLIENT_SECRET: ${AUTOMATION_CLIENT_SECRET:?AUTOMATION_CLIENT_SECRET is required (run node node-service/scripts/setup-env.js)}
     ports:
       - "8180:8080"
     volumes:
@@ -45,6 +58,7 @@ services:
         condition: service_healthy
 
   notification-service:
+    logging: *default-logging
     profiles: ["legacy-java"]
     build: ./notification-service
     environment:
@@ -64,6 +78,7 @@ services:
         condition: service_started
 
   gateway-service:
+    logging: *default-logging
     build: ./node-service
     environment:
       NODE_ENV: ${NODE_ENV:-production}
@@ -88,16 +103,23 @@ services:
         condition: service_started
 
   prometheus:
+    logging: *default-logging
     image: prom/prometheus:v2.55.1
-    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=2GB
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
     ports:
       - "9090:9090"
     depends_on:
       - gateway-service
 
   tls-proxy:
+    logging: *default-logging
     image: nginx:1.27-alpine
     profiles: ["tls"]
     ports:
@@ -108,7 +130,56 @@ services:
     depends_on:
       - gateway-service
 
+  # ---- observability 프로필: docker compose --profile observability up ----
+  loki:
+    image: grafana/loki:3.2.1
+    profiles: ["observability"]
+    logging: *default-logging
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./infra/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+
+  alloy:
+    image: grafana/alloy:v1.5.1
+    profiles: ["observability"]
+    logging: *default-logging
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ./infra/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # 컨테이너 로그 수집용. 읽기 전용이어도 Docker API 전체 권한이므로 운영에서는 노드 에이전트로 대체합니다.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    profiles: ["observability"]
+    logging: *default-logging
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for the observability profile}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+
 volumes:
   postgres-data:
   redis-data:
+  prometheus-data:
+  loki-data:
+  alloy-data:
+  grafana-data:
 
