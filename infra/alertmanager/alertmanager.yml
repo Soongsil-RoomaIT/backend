@@ -1,0 +1,37 @@
+# Prometheus 경보를 Slack 호환 Incoming Webhook으로 통지합니다.
+# Webhook URL은 저장소에 두지 않고 secrets/alertmanager/slack-webhook-url 파일 한 줄로 둡니다.
+# Discord는 채널 Webhook URL 뒤에 /slack을 붙이면 같은 형식으로 받을 수 있습니다.
+# 파일이 없으면 Alertmanager는 정상 기동하고 통지 시점에만 실패를 기록합니다(UI 9093에서 경보 확인 가능).
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: team-chat
+  group_by: [alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: team-chat
+      group_wait: 10s
+      repeat_interval: 1h
+
+inhibit_rules:
+  # Gateway 자체가 내려가면 그 지표에서 파생된 warning 경보는 묶어서 억제합니다.
+  - source_matchers: ['alertname="GatewayDown"']
+    target_matchers: ['severity="warning"']
+  # Redis 의존성 장애 중에는 같은 원인의 알림 발송 실패 경보를 억제합니다.
+  - source_matchers: ['alertname="RedisUnavailable"']
+    target_matchers: ['alertname="NotificationDeliveryFailures"']
+  # C 서버 readiness 실패 중에는 연결 실패 횟수 경보를 중복 통지하지 않습니다.
+  - source_matchers: ['alertname="CloudServerDown"']
+    target_matchers: ['alertname="CloudServerUnreachable"']
+
+receivers:
+  - name: team-chat
+    slack_configs:
+      - api_url_file: /etc/alertmanager/secrets/slack-webhook-url
+        send_resolved: true
+        title: '{{ if eq .Status "firing" }}[발생]{{ else }}[해소]{{ end }} {{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'
+        text: '{{ range .Alerts }}• {{ .Annotations.summary }}: {{ .Annotations.description }}{{ "\n" }}{{ end }}'

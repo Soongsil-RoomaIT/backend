@@ -19,3 +19,11 @@ jobs:
       - run: npm ci --ignore-scripts --omit=optional
       - run: npm test
       - run: npm audit --omit=optional --audit-level=moderate
+  monitoring-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Prometheus config and alert rules
+        run: docker run --rm -v "$PWD/infra/prometheus:/etc/prometheus:ro" --entrypoint promtool prom/prometheus:v2.55.1 check config /etc/prometheus/prometheus.yml
+      - name: Validate Alertmanager routes and receivers
+        run: docker run --rm -v "$PWD/infra/alertmanager:/etc/alertmanager:ro" --entrypoint amtool prom/alertmanager:v0.27.0 check-config /etc/alertmanager/alertmanager.yml

@@ -1,4 +1,4 @@
-# Prometheus UI(Alerts 탭)와 Grafana에서 확인합니다. 외부 통지는 Alertmanager 연결 시 추가합니다.
+# Prometheus UI(Alerts 탭)와 Grafana에서 확인하고, Alertmanager(infra/alertmanager)가 팀 채널로 통지합니다.
 groups:
   - name: room-care-gateway
     rules:
@@ -18,6 +18,20 @@ groups:
         annotations:
           summary: Gateway 5xx 비율 5% 초과
           description: 최근 5분 Gateway 응답의 5% 이상이 5xx입니다. C 서버 연결(502) 또는 Redis 오류(503)를 확인하세요.
+      - alert: RedisUnavailable
+        expr: gateway_dependency_up{job="gateway-service",dependency="redis"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: Gateway의 Redis 연결 불가
+          description: 1분 이상 Redis readiness 검사가 실패했습니다. FCM 토큰 등록·알림 발송·중복 방지가 동작하지 않습니다.
+      - alert: CloudServerDown
+        expr: gateway_dependency_up{job="gateway-service",dependency="cloud"} == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: C Cloud Server readiness 실패
+          description: 2분 이상 CLOUD_SERVICE_URL의 CLOUD_HEALTH_PATH가 응답하지 않거나 5xx를 반환합니다. 센서·장치 API와 WebSocket이 502가 됩니다.
       - alert: CloudServerUnreachable
         expr: sum(increase(gateway_cloud_upstream_failures_total[5m])) > 10
         for: 2m
@@ -40,3 +54,10 @@ groups:
         annotations:
           summary: Gateway p95 응답 1초 초과
           description: 10분 이상 p95 응답 시간이 1초를 넘었습니다.
+      - alert: AlertmanagerNotificationsFailing
+        expr: sum(increase(alertmanager_notifications_failed_total{job="alertmanager"}[15m])) > 0
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: Alertmanager 외부 통지 실패
+          description: 최근 15분 안에 팀 채널 통지가 실패했습니다. secrets/alertmanager/slack-webhook-url을 확인하세요.

@@ -5,7 +5,7 @@ import { initializeApp, applicationDefault } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
 import { cipher, verifier } from './security.js';
 import { Notifications } from './notifications.js';
-import { createApp } from './app.js';
+import { cloudCheck, createApp } from './app.js';
 
 const logger = pino();
 const config = {
@@ -14,7 +14,8 @@ const config = {
   devAuth: process.env.DEV_AUTH_BYPASS === 'true',
   issuer: process.env.JWT_ISSUER_URI ?? 'http://localhost:8180/realms/room-care',
   jwks: process.env.JWT_JWK_SET_URI ?? 'http://localhost:8180/realms/room-care/protocol/openid-connect/certs',
-  audience: process.env.JWT_AUDIENCE ?? 'room-care-api', timeout: 5000, heartbeat: 15000
+  audience: process.env.JWT_AUDIENCE ?? 'room-care-api', timeout: 5000, heartbeat: 15000,
+  cloudHealthPath: process.env.CLOUD_HEALTH_PATH ?? '/'
 };
 if (config.devAuth && process.env.NODE_ENV !== 'development') throw new Error('DEV_AUTH_BYPASS requires NODE_ENV=development');
 if (config.devAuth) logger.warn('Development authentication bypass enabled; ADMIN APIs remain forbidden');
@@ -34,7 +35,11 @@ if (process.env.FCM_ENABLED === 'true') {
 } else logger.warn('FCM disabled: notification delivery is dry-run');
 const registry = new Registry(); collectDefaultMetrics({register: registry});
 const notifications = new Notifications(redis, encryption, sender);
-const {server, wss} = createApp({config, verify: verifier(config), notifications, logger, registry});
+const checks = {
+  redis: async () => { if (!redis.isReady) throw new Error('Redis not ready'); await redis.ping(); },
+  cloud: cloudCheck(config)
+};
+const {server, wss} = createApp({config, verify: verifier(config), notifications, logger, registry, checks});
 server.listen(config.port, () => logger.info({port: config.port}, 'Gateway ready'));
 async function stop() {
   for (const client of wss.clients) client.terminate();

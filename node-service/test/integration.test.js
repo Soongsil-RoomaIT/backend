@@ -185,3 +185,29 @@ test('realm grants NOTIFICATION_SENDER only to the automation service account', 
   assert.deepEqual(realm.users.find(u=>u.serviceAccountClientId==='room-care-automation').realmRoles,['NOTIFICATION_SENDER']);
   assert.ok(!realm.clients.find(c=>c.clientId==='room-care-web').serviceAccountsEnabled);
 });
+
+test('readiness reports Redis/C server status, times out hung checks and exports dependency gauge', async t => {
+  let cloudStatus=200;
+  const cloud=createServer((req,res)=>{res.statusCode=req.url==='/health'?cloudStatus:404;res.end();});
+  const cloudUrl=await listen(cloud); t.after(()=>close(cloud));
+  const {cloudCheck}=await import('../src/app.js');
+  let redisUp=true;
+  const checks={redis:async()=>{if(!redisUp)return new Promise(()=>{});}, cloud:cloudCheck({cloud:cloudUrl,cloudHealthPath:'/health',timeout:200})};
+  const {server,wss}=createApp({config:{...config,devAuth:false,cloud:cloudUrl},verify:async()=>{throw Error();},notifications:{},logger,registry:new Registry(),checks});
+  const base=await listen(server); t.after(()=>{wss.close();close(server);});
+  const ready=await fetch(base+'/actuator/health/readiness');
+  assert.equal(ready.status,200);
+  assert.deepEqual(await ready.json(),{status:'UP',components:{redis:{status:'UP'},cloud:{status:'UP'}}});
+  redisUp=false; cloudStatus=503;
+  const down=await fetch(base+'/actuator/health/readiness');
+  assert.equal(down.status,503);
+  assert.deepEqual(await down.json(),{status:'DOWN',components:{redis:{status:'DOWN'},cloud:{status:'DOWN'}}});
+  assert.equal((await fetch(base+'/actuator/health/liveness')).status,200);
+  redisUp=true; close(cloud);
+  const text=await (await fetch(base+'/actuator/prometheus')).text();
+  assert.match(text,/gateway_dependency_up\{dependency="redis"\} 1/);
+  assert.match(text,/gateway_dependency_up\{dependency="cloud"\} 0/);
+  assert.match(text,/route="\/actuator\/health\/liveness",status_code="200"/);
+  assert.match(text,/route="\/actuator\/health\/readiness",status_code="503"/);
+  assert.doesNotMatch(text,/route="[^"]*,/);
+});
