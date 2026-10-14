@@ -73,5 +73,7 @@ docker compose --profile tls up --build
 - [x] Grafana/Loki 대시보드와 로그 보존 정책 추가
   — `docker compose --profile observability up`, Loki 7일·Prometheus 15일 보존 ([가이드](docs/NODE_BACKEND.md#grafanaloki))
 - [ ] C 담당에 `AUTOMATION_CLIENT_SECRET` 전달 및 자동화 이벤트에서 알림 API 호출 연동
-- [ ] Alertmanager 연결로 경보 외부 통지, Redis·C 서버 readiness 검사 추가
+- [x] Alertmanager 연결로 경보 외부 통지, Redis·C 서버 readiness 검사 추가
+  — `/actuator/health/readiness`, `gateway_dependency_up` 지표, Slack 호환 Webhook 통지 ([가이드](docs/NODE_BACKEND.md#alertmanager))
+- [ ] 팀 채널 Webhook URL을 `secrets/alertmanager/slack-webhook-url`에 저장, C 서버 헬스 경로를 `CLOUD_HEALTH_PATH`에 지정
 

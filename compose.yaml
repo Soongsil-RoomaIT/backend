@@ -90,12 +90,19 @@ services:
       JWT_ISSUER_URI: http://localhost:8180/realms/room-care
       JWT_JWK_SET_URI: http://keycloak:8080/realms/room-care/protocol/openid-connect/certs
       CLOUD_SERVICE_URL: ${CLOUD_SERVICE_URL:-http://host.docker.internal:8081}
+      CLOUD_HEALTH_PATH: ${CLOUD_HEALTH_PATH:-/}
       FCM_ENABLED: ${FCM_ENABLED:-false}
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase-service-account.json
     volumes:
       - ./secrets:/run/secrets:ro
     ports:
       - "8080:8080"
+    # 생존(liveness)만 검사합니다. C 서버 장애로 Gateway 컨테이너가 재시작되지 않도록 readiness는 경보로만 다룹니다.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/actuator/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
     depends_on:
       redis:
         condition: service_healthy
@@ -117,6 +124,22 @@ services:
       - "9090:9090"
     depends_on:
       - gateway-service
+      - alertmanager
+
+  alertmanager:
+    logging: *default-logging
+    image: prom/alertmanager:v0.27.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --data.retention=120h
+    volumes:
+      - ./infra/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # slack-webhook-url 파일 하나만 둡니다. 다른 비밀(Firebase 등)은 노출하지 않습니다.
+      - ./secrets/alertmanager:/etc/alertmanager/secrets:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
 
   tls-proxy:
     logging: *default-logging
@@ -179,6 +202,7 @@ volumes:
   postgres-data:
   redis-data:
   prometheus-data:
+  alertmanager-data:
   loki-data:
   alloy-data:
   grafana-data:

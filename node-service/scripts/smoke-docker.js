@@ -68,11 +68,17 @@ try {
     console.log('SKIP room-care-automation: realm volume predates the client or AUTOMATION_CLIENT_SECRET differs (see docs/NODE_BACKEND.md)');
   }
   const health=await call(`${gateway}/actuator/health`);assert.equal(health.status,'UP');
+  // C 서버가 로컬에 없으면 readiness는 503이 정상이므로 Redis 구성 요소만 필수로 확인합니다.
+  const readiness=await fetch(`${gateway}/actuator/health/readiness`,{signal:AbortSignal.timeout(10000)});
+  const ready=await readiness.json();
+  assert.equal(ready.components.redis.status,'UP');
+  console.log(`PASS readiness (redis UP, cloud ${ready.components.cloud.status})`);
   const metrics=await fetch(`${gateway}/actuator/prometheus`);assert.equal(metrics.status,200);
   const metricsText=await metrics.text();
   assert.ok(metricsText.includes('process_cpu'));
   assert.ok(metricsText.includes('http_server_request_duration_seconds_bucket'));
   assert.ok(metricsText.includes('gateway_notifications_total{status="dry-run"}'));
+  assert.ok(metricsText.includes('gateway_dependency_up{dependency="redis"} 1'));
   console.log('PASS health and Prometheus metrics');
 } finally {
   if(clientUuid&&adminToken){await call(`${adminPath}/clients/${clientUuid}`,{token:adminToken,method:'DELETE',expected:204});console.log('Removed temporary Keycloak smoke-test client');}

@@ -15,7 +15,7 @@ SAD는 v1.1을 유지하고 작업 브랜치는 minjae입니다.
 docker compose up --build
 ```
 
-Gateway 8080, Keycloak 8180, Prometheus 9090을 사용합니다.
+Gateway 8080, Keycloak 8180, Prometheus 9090, Alertmanager 9093(127.0.0.1)을 사용합니다.
 기본 Gateway는 node-service이며 기존 Java notification-service는 legacy-java 프로필로 보관합니다.
 직접 실행은 Node.js 22 이상과 Redis를 준비하고 node-service에서 `npm ci`, `npm start`입니다.
 이때 `REDIS_URL=redis://localhost:6379`, `CLOUD_SERVICE_URL=http://localhost:8081`과
@@ -148,7 +148,22 @@ userId + eventId 기준 NX/24시간 TTL 중복 방지, 중복 요청은 duplicat
 `docker compose --profile tls up --build`로 TLS 1.3 및 WS upgrade 프록시를 실행합니다.
 운영 Origin은 CORS_ORIGINS에 명시하고 내부 서비스는 직접 외부에 노출하지 않습니다.
 운영 키는 Secret Manager로 관리합니다.
-/actuator/health는 프로세스 생존 확인이며 Redis와 C 서버 준비 상태를 보장하는 readiness 검사는 아닙니다.
+### 헬스 검사
+
+| 경로 | 의미 | 실패 시 |
+| --- | --- | --- |
+| /actuator/health, /actuator/health/liveness | 프로세스 생존. Docker healthcheck가 사용 | - |
+| /actuator/health/readiness | Redis PING과 C 서버 도달 여부 | 503 |
+
+```json
+{"status":"DOWN","components":{"redis":{"status":"UP"},"cloud":{"status":"DOWN"}}}
+```
+
+- Redis는 연결 준비 상태와 PING, C 서버는 `CLOUD_SERVICE_URL` + `CLOUD_HEALTH_PATH`(기본 `/`)의 HTTP 응답으로 판단합니다.
+  5xx·연결 실패·5초 초과면 DOWN이며 4xx(인증 필요, 경로 없음)는 서버가 살아 있는 것으로 봅니다.
+  C 담당 서버에 헬스 엔드포인트가 생기면 `.env`의 `CLOUD_HEALTH_PATH`를 그 경로로 바꿉니다.
+- 응답에는 오류 내용이나 주소를 넣지 않습니다. readiness는 인증 없이 열려 있으므로 운영에서는 내부망에서만 노출합니다.
+- C 서버 장애로 Gateway가 재시작되지 않도록 Docker healthcheck는 liveness만 사용합니다.
 JSON 로그는 requestId/메서드/경로 라벨/상태/소요 시간만 기록하며 토큰과 본문은 기록하지 않습니다.
 
 ### 지표
@@ -163,10 +178,35 @@ JSON 로그는 requestId/메서드/경로 라벨/상태/소요 시간만 기록�
 | gateway_websocket_clients | - | 현재 브라우저 WebSocket 연결 수 |
 | gateway_cloud_upstream_failures_total | transport(rest/ws) | C 서버 연결 실패 |
 | gateway_notifications_total | status | sent/dry-run/duplicate/partial-failure/no-targets/error |
+| gateway_dependency_up | dependency(redis/cloud) | 스크레이프 시점 readiness 결과(1/0) |
 
-Prometheus는 `infra/prometheus/alerts.yml`의 GatewayDown, GatewayHighErrorRate(5xx 5% 초과),
-CloudServerUnreachable, NotificationDeliveryFailures, GatewaySlowResponses(p95 1초 초과) 규칙을 평가합니다.
-외부 통지(메일·Slack)는 Alertmanager를 붙일 때 추가합니다.
+Prometheus는 `infra/prometheus/alerts.yml`의 규칙을 평가합니다.
+
+| 경보 | 심각도 | 조건 |
+| --- | --- | --- |
+| GatewayDown | critical | Gateway 지표 수집 1분 실패 |
+| RedisUnavailable | critical | Redis readiness 1분 실패 |
+| CloudServerDown | warning | C 서버 readiness 2분 실패 |
+| GatewayHighErrorRate | warning | 5xx 5% 초과 5분 |
+| CloudServerUnreachable | warning | 5분간 C 서버 연결 실패 10회 초과 |
+| NotificationDeliveryFailures | warning | 15분 안에 발송 오류·일부 실패 |
+| GatewaySlowResponses | warning | p95 1초 초과 10분 |
+| AlertmanagerNotificationsFailing | warning | 15분 안에 팀 채널 통지 실패 |
+
+### Alertmanager
+
+기본 `docker compose up`에 포함되며 UI는 http://127.0.0.1:9093입니다.
+경보는 Slack 호환 Incoming Webhook으로 발생·해소를 모두 통지합니다(critical 1시간, warning 4시간마다 반복).
+
+1. 팀 채널의 Webhook URL을 `secrets/alertmanager/slack-webhook-url` 파일에 한 줄로 저장합니다.
+   Discord는 채널 Webhook URL 끝에 `/slack`을 붙입니다. `secrets/`는 git에 올라가지 않습니다.
+2. `docker compose up -d alertmanager`로 반영합니다. 설정만 바꿨다면 `curl -X POST http://127.0.0.1:9093/-/reload`.
+3. 확인: `curl -X POST http://127.0.0.1:9093/api/v2/alerts -H 'Content-Type: application/json' -d '[{"labels":{"alertname":"TestAlert","severity":"warning"},"annotations":{"summary":"테스트","description":"Alertmanager 통지 확인"}}]'`
+
+파일이 없어도 Alertmanager는 기동하며 통지만 실패합니다(AlertmanagerNotificationsFailing 경보와 로그로 확인).
+같은 원인의 중복 통지는 억제합니다: GatewayDown 중 warning 전체, RedisUnavailable 중 NotificationDeliveryFailures,
+CloudServerDown 중 CloudServerUnreachable. 라우팅은 `infra/alertmanager/alertmanager.yml`에서 바꾸고,
+CI가 promtool·amtool로 Prometheus·Alertmanager 설정을 검증합니다.
 
 ### Grafana/Loki
 

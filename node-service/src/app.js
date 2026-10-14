@@ -15,15 +15,42 @@ const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HE
 
 // Bounded route label so arbitrary request paths cannot explode Prometheus cardinality.
 export function routeLabel(path) {
-  if (['/actuator/health', '/actuator/prometheus', '/ws', '/api/push/token', '/api/notifications', '/api/notifications/send'].includes(path)) return path;
+  if (['/actuator/health', '/actuator/health/liveness', '/actuator/health/readiness', '/actuator/prometheus', '/ws', '/api/push/token', '/api/notifications', '/api/notifications/send'].includes(path)) return path;
   const match = /^\/api\/([^/]+)/.exec(path);
   if (!match) return 'other';
   return API_SEGMENTS.has(match[1]) ? `/api/${match[1]}` : '/api/other';
 }
 
-function createMetrics(registry) {
+// Readiness check for the C cloud server: any non-5xx HTTP answer means it is reachable.
+export function cloudCheck(config) {
+  return async () => {
+    const response = await fetch(new URL(config.cloudHealthPath ?? '/', config.cloud), {signal: AbortSignal.timeout(config.timeout), redirect: 'manual'});
+    await response.body?.cancel();
+    if (response.status >= 500) throw new Error(`Cloud server returned ${response.status}`);
+  };
+}
+
+// Runs every dependency check with a deadline; failures are reported as DOWN without error details.
+async function runChecks(checks, timeout) {
+  const entries = await Promise.all(Object.entries(checks).map(async ([name, check]) => {
+    let timer;
+    try {
+      await Promise.race([check(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), timeout); })]);
+      return [name, {status: 'UP'}];
+    } catch { return [name, {status: 'DOWN'}]; }
+    finally { clearTimeout(timer); }
+  }));
+  return {status: entries.every(([, c]) => c.status === 'UP') ? 'UP' : 'DOWN', components: Object.fromEntries(entries)};
+}
+
+function createMetrics(registry, readiness) {
   const registers = [registry];
   return {
+    // Evaluated on each Prometheus scrape so alerts see Redis/C server outages without traffic.
+    dependencyUp: new Gauge({name: 'gateway_dependency_up', help: 'Gateway dependency readiness (1 = up)',
+      labelNames: ['dependency'], registers, async collect() {
+        for (const [name, c] of Object.entries((await readiness()).components)) this.set({dependency: name}, c.status === 'UP' ? 1 : 0);
+      }}),
     http: new Histogram({name: 'http_server_request_duration_seconds', help: 'Gateway HTTP request duration',
       labelNames: ['method', 'route', 'status_code'], buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5], registers}),
     wsClients: new Gauge({name: 'gateway_websocket_clients', help: 'Open browser WebSocket connections', registers}),
@@ -34,8 +61,9 @@ function createMetrics(registry) {
   };
 }
 
-export function createApp({config, verify, notifications, logger, registry}) {
-  const metrics = createMetrics(registry);
+export function createApp({config, verify, notifications, logger, registry, checks = {}}) {
+  const readiness = () => runChecks(checks, config.timeout);
+  const metrics = createMetrics(registry, readiness);
   const app = express();
   app.disable('x-powered-by');
   app.use((req, res, next) => {
@@ -43,14 +71,20 @@ export function createApp({config, verify, notifications, logger, registry}) {
     const start = process.hrtime.bigint();
     res.on('finish', () => {
       const seconds = Number(process.hrtime.bigint() - start) / 1e9;
-      const route = req.route?.path ? (req.baseUrl ?? '') + req.route.path : routeLabel(req.originalUrl.split('?')[0]);
+      // Array-registered routes expose every alias in route.path, so label those by the requested path.
+      const route = typeof req.route?.path === 'string' ? (req.baseUrl ?? '') + req.route.path : routeLabel(req.originalUrl.split('?')[0]);
       metrics.http.observe({method: METHODS.has(req.method) ? req.method : 'OTHER', route, status_code: String(res.statusCode)}, seconds);
       logger.info({requestId: req.id, method: req.method, route, status: res.statusCode, durationMs: Math.round(seconds*1000)}, 'HTTP request');
     });
     next();
   });
   app.use(cors({origin: config.origins, credentials: true}));
-  app.get('/actuator/health', (_req, res) => res.json({status: 'UP'}));
+  // Liveness only: the process is serving. Readiness additionally requires Redis and the C server.
+  app.get(['/actuator/health', '/actuator/health/liveness'], (_req, res) => res.json({status: 'UP'}));
+  app.get('/actuator/health/readiness', async (_req, res) => {
+    const result = await readiness();
+    res.status(result.status === 'UP' ? 200 : 503).json(result);
+  });
   app.get('/actuator/prometheus', async (_req, res) => {
     res.type(registry.contentType).send(await registry.metrics());
   });
