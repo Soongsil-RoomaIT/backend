@@ -15,7 +15,7 @@ const config = {
   issuer: process.env.JWT_ISSUER_URI ?? 'http://localhost:8180/realms/room-care',
   jwks: process.env.JWT_JWK_SET_URI ?? 'http://localhost:8180/realms/room-care/protocol/openid-connect/certs',
   audience: process.env.JWT_AUDIENCE ?? 'room-care-api', timeout: 5000, heartbeat: 15000,
-  cloudHealthPath: process.env.CLOUD_HEALTH_PATH ?? '/'
+  cloudHealthPath: process.env.CLOUD_HEALTH_PATH ?? '/health'
 };
 if (config.devAuth && process.env.NODE_ENV !== 'development') throw new Error('DEV_AUTH_BYPASS requires NODE_ENV=development');
 if (config.devAuth) logger.warn('Development authentication bypass enabled; ADMIN APIs remain forbidden');

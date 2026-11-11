@@ -43,7 +43,7 @@ test('JWT verifies issuer, audience, expiry and signature through JWKS', async t
 test('REST forwards monitoring routes, CORS, credentials; D APIs are scoped and send requires ADMIN', async t => {
   let forwarded;
   const cloud = createServer((req,res) => {
-    forwarded = {url:req.url, auth:req.headers.authorization, spoof:req.headers['x-user-id']};
+    forwarded = {url:req.url, auth:req.headers.authorization, spoof:req.headers['x-user-id'], key:req.headers['idempotency-key']};
     res.setHeader('content-type','application/json');
     res.statusCode = req.url.includes('range=bad') ? 400 : 200;
     res.end(JSON.stringify({range:'1h', bucketSeconds:60, points:[]}));
@@ -60,10 +60,17 @@ test('REST forwards monitoring routes, CORS, credentials; D APIs are scoped and 
   const headers={Authorization:'Bearer test-token',Origin:config.origins[0]};
   const cors=await fetch(base+'/api/sensors/latest',{method:'OPTIONS',headers:{Origin:config.origins[0],'Access-Control-Request-Method':'GET'}});
   assert.equal(cors.status,204); assert.equal(cors.headers.get('access-control-allow-origin'),config.origins[0]);
+  const preflight=await fetch(base+'/api/devices/window-1/commands',{method:'OPTIONS',headers:{Origin:config.origins[0],'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'content-type,idempotency-key,authorization'}});
+  assert.equal(preflight.status,204); assert.match(preflight.headers.get('access-control-allow-headers'),/Idempotency-Key/);
   assert.equal((await fetch(base+'/api/edge/status')).status,401);
   const response=await fetch(base+'/api/sensors/history?range=1h',{headers:{...headers,'X-User-Id':'spoof'}});
   assert.equal(response.status,200); assert.deepEqual((await response.json()).points,[]);
-  assert.deepEqual(forwarded,{url:'/api/sensors/history?range=1h',auth:'Bearer test-token',spoof:undefined});
+  assert.deepEqual(forwarded,{url:'/api/sensors/history?range=1h',auth:'Bearer test-token',spoof:undefined,key:undefined});
+  const command=await fetch(base+'/api/devices/window-1/commands',{method:'POST',headers:{...headers,'content-type':'application/json','Idempotency-Key':'3f2b9c1e-key'},body:JSON.stringify({action:'CLOSE'})});
+  assert.equal(command.status,200); assert.equal(forwarded.key,'3f2b9c1e-key'); assert.equal(forwarded.url,'/api/devices/window-1/commands');
+  forwarded=undefined;
+  const badKey=await fetch(base+'/api/devices/window-1/commands',{method:'POST',headers:{...headers,'content-type':'application/json','Idempotency-Key':'x'.repeat(201)},body:'{}'});
+  assert.equal(badKey.status,400); assert.equal(forwarded,undefined);
   assert.equal((await fetch(base+'/api/sensors/history?range=bad',{headers})).status,400);
   assert.equal((await fetch(base+'/api/push/token',{method:'POST',headers:{...headers,'content-type':'application/json'},body:JSON.stringify({token:'fcm-1',userId:'spoof'})})).status,204);
   assert.deepEqual(calls,[['user-1','fcm-1']]);

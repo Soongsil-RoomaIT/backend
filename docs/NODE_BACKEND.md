@@ -39,6 +39,9 @@ MQTT 수집, 이력 집계, 자동화 판단과 edge.recovered 생성은 C 담�
 C 서버는 JWT와 사용자별 장치·공간 권한을 검증해야 합니다.
 Gateway는 X-User-Id 같은 호출자 지정 신원을 전달하지 않습니다.
 C 서버 응답 상태 코드는 유지하고 연결 실패는 502입니다. 가짜 센서값은 만들지 않습니다.
+기기 명령의 `Idempotency-Key` 헤더(출력 가능한 ASCII 1~200자)는 그대로 C 서버로 전달하며, 형식이 틀리면 400입니다.
+C 서버는 실제 장비 모드에서 이 키가 없는 명령을 400으로 거부하고 24시간 중복을 차단합니다.
+CORS는 `Content-Type`, `Authorization`, `Idempotency-Key` 요청 헤더를 허용하고 `X-Request-Id`를 노출합니다.
 프론트 명세의 필수 co2/pm25/pm10과 현재 온습도·터치·초음파 센서는 불일치하므로
 C/E 담당자가 타입과 표시를 함께 맞춰야 합니다.
 
@@ -159,9 +162,9 @@ userId + eventId 기준 NX/24시간 TTL 중복 방지, 중복 요청은 duplicat
 {"status":"DOWN","components":{"redis":{"status":"UP"},"cloud":{"status":"DOWN"}}}
 ```
 
-- Redis는 연결 준비 상태와 PING, C 서버는 `CLOUD_SERVICE_URL` + `CLOUD_HEALTH_PATH`(기본 `/`)의 HTTP 응답으로 판단합니다.
+- Redis는 연결 준비 상태와 PING, C 서버는 `CLOUD_SERVICE_URL` + `CLOUD_HEALTH_PATH`(기본 `/health`)의 HTTP 응답으로 판단합니다.
   5xx·연결 실패·5초 초과면 DOWN이며 4xx(인증 필요, 경로 없음)는 서버가 살아 있는 것으로 봅니다.
-  C 담당 서버에 헬스 엔드포인트가 생기면 `.env`의 `CLOUD_HEALTH_PATH`를 그 경로로 바꿉니다.
+  C 서버의 `/health`는 엣지 단절 등으로 `degraded`여도 200이므로 C 프로세스 도달 여부만 뜻합니다.
 - 응답에는 오류 내용이나 주소를 넣지 않습니다. readiness는 인증 없이 열려 있으므로 운영에서는 내부망에서만 노출합니다.
 - C 서버 장애로 Gateway가 재시작되지 않도록 Docker healthcheck는 liveness만 사용합니다.
 JSON 로그는 requestId/메서드/경로 라벨/상태/소요 시간만 기록하며 토큰과 본문은 기록하지 않습니다.

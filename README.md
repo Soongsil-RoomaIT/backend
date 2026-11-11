@@ -75,5 +75,8 @@ docker compose --profile tls up --build
 - [ ] C 담당에 `AUTOMATION_CLIENT_SECRET` 전달 및 자동화 이벤트에서 알림 API 호출 연동
 - [x] Alertmanager 연결로 경보 외부 통지, Redis·C 서버 readiness 검사 추가
   — `/actuator/health/readiness`, `gateway_dependency_up` 지표, Slack 호환 Webhook 통지 ([가이드](docs/NODE_BACKEND.md#alertmanager))
-- [ ] 팀 채널 Webhook URL을 `secrets/alertmanager/slack-webhook-url`에 저장, C 서버 헬스 경로를 `CLOUD_HEALTH_PATH`에 지정
+- [x] C 서버 연동 요청 반영: 기기 명령 `Idempotency-Key` 전달·CORS 허용, `CLOUD_HEALTH_PATH=/health`
+  — cloud-server `docs/TEAM_INTEGRATION.md`의 D 요청사항
+- [ ] 팀 채널 Webhook URL을 `secrets/alertmanager/slack-webhook-url`에 저장
+- [ ] 알림 목록·읽음 API 계약을 C·E와 확정 (D: id/title/body/data/status, C: message/read/pushStatus)
 

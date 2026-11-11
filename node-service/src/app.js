@@ -12,6 +12,8 @@ import { bearer } from './security.js';
 export const SENDER_ROLES = ['ADMIN', 'NOTIFICATION_SENDER'];
 const API_SEGMENTS = new Set(['sensors', 'devices', 'edge', 'forecast', 'decisions', 'settings']);
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
+// Command deduplication key generated per button press by the web app; C rejects live commands without it.
+const IDEMPOTENCY_KEY = /^[!-~]{1,200}$/;
 
 // Bounded route label so arbitrary request paths cannot explode Prometheus cardinality.
 export function routeLabel(path) {
@@ -78,7 +80,8 @@ export function createApp({config, verify, notifications, logger, registry, chec
     });
     next();
   });
-  app.use(cors({origin: config.origins, credentials: true}));
+  app.use(cors({origin: config.origins, credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'], exposedHeaders: ['X-Request-Id']}));
   // Liveness only: the process is serving. Readiness additionally requires Redis and the C server.
   app.get(['/actuator/health', '/actuator/health/liveness'], (_req, res) => res.json({status: 'UP'}));
   app.get('/actuator/health/readiness', async (_req, res) => {
@@ -127,6 +130,11 @@ export function createApp({config, verify, notifications, logger, registry, chec
       url.search = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       const headers = {'x-request-id': req.id};
       if (bearer(req)) headers.authorization = `Bearer ${bearer(req)}`;
+      const idempotencyKey = req.get('idempotency-key');
+      if (idempotencyKey !== undefined) {
+        if (!IDEMPOTENCY_KEY.test(idempotencyKey)) return res.status(400).json({message: 'Invalid Idempotency-Key', requestId: req.id});
+        headers['idempotency-key'] = idempotencyKey;
+      }
       let body;
       if (!['GET','HEAD'].includes(req.method) && req.body !== undefined) {
         headers['content-type'] = 'application/json'; body = JSON.stringify(req.body);
