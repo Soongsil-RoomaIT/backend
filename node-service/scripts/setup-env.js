@@ -5,13 +5,13 @@ import {fileURLToPath} from 'node:url';
 const root = new URL('../../', import.meta.url);
 const envFile = new URL('.env', root);
 const defaults = {
-  KEYCLOAK_ADMIN_PASSWORD: () => randomBytes(24).toString('hex'),
   POSTGRES_PASSWORD: () => randomBytes(24).toString('hex'),
   DATA_ENCRYPTION_KEY_BASE64: () => randomBytes(32).toString('base64'),
-  AUTOMATION_CLIENT_SECRET: () => randomBytes(32).toString('hex'),
+  INTERNAL_API_KEY: () => randomBytes(32).toString('hex'),
+  MQTT_EDGE_PASSWORD: () => randomBytes(18).toString('hex'),
+  MQTT_CLOUD_PASSWORD: () => randomBytes(18).toString('hex'),
   GRAFANA_ADMIN_PASSWORD: () => randomBytes(18).toString('hex'),
-  CLOUD_SERVICE_URL: () => 'http://host.docker.internal:8081',
-  NODE_ENV: () => 'production', DEV_AUTH_BYPASS: () => 'false',
+  EDGE_DEVICE_ID: () => 'room-001', ROOM_USER_ID: () => 'room-user',
   CORS_ORIGINS: () => 'http://localhost:5173', FCM_ENABLED: () => 'false'
 };
 if (!existsSync(envFile)) {

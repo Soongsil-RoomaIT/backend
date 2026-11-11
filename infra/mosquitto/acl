@@ -1,0 +1,6 @@
+# Cloud Server는 모든 방의 토픽을 읽고 씁니다.
+user cloud-server
+topic readwrite roomcare/#
+
+# 엣지 계정은 사용자명이 곧 deviceId(예: room-001)이며 자기 토픽 roomcare/{deviceId}/# 만 사용합니다.
+pattern readwrite roomcare/%u/#

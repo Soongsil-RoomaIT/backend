@@ -1,85 +1,60 @@
-import {readFileSync} from 'node:fs';
+// Verifies the running Compose stack (docker compose up -d --build) from the host.
+// Public traffic goes through nginx on :80; internal-only endpoints are exercised inside the gateway container.
+import {execFileSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import assert from 'node:assert/strict';
 
-const env = Object.fromEntries(readFileSync(new URL('../../.env',import.meta.url),'utf8').trim().split(/\r?\n/).map(line=>{const i=line.indexOf('=');return[line.slice(0,i),line.slice(i+1)];}));
-const auth='http://localhost:8180';
-const gateway='http://localhost:8080';
-const clientId=`local-smoke-${randomUUID()}`;
-const clientSecret=randomUUID();
-let adminToken, clientUuid;
-async function call(url,{token,body,method='GET',expected=200,form=false}={}) {
-  const response=await fetch(url,{method,headers:{...(token?{authorization:`Bearer ${token}`}:{}) ,...(body?{'content-type':form?'application/x-www-form-urlencoded':'application/json'}:{})},body:body?(form?new URLSearchParams(body):JSON.stringify(body)):undefined,signal:AbortSignal.timeout(10000)});
-  assert.equal(response.status,expected,`${method} ${new URL(url).pathname}: unexpected HTTP status`);
-  const text=await response.text();return text?JSON.parse(text):null;
+const base = process.env.SMOKE_BASE_URL ?? 'http://localhost';
+const root = new URL('../../', import.meta.url);
+
+async function call(path, {method = 'GET', body, expected = 200} = {}) {
+  const response = await fetch(base + path, {method, headers: body ? {'content-type': 'application/json'} : {},
+    body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(10000)});
+  assert.equal(response.status, expected, `${method} ${path}: unexpected HTTP status`);
+  const text = await response.text();
+  return text && response.headers.get('content-type')?.includes('json') ? JSON.parse(text) : text;
 }
-async function token(realm,body){return(await call(`${auth}/realms/${realm}/protocol/openid-connect/token`,{method:'POST',form:true,body})).access_token;}
-const adminPath=`${auth}/admin/realms/room-care`;
-const deadline=Date.now()+60_000;
-let ready=false;
-while(Date.now()<deadline){
-  try {
-    const response=await fetch(`${auth}/realms/room-care/.well-known/openid-configuration`,{signal:AbortSignal.timeout(2000)});
-    if(response.ok){ready=true;break;}
-  } catch { /* Keycloak may still be importing the realm. */ }
-  await new Promise(resolve=>setTimeout(resolve,1000));
+// Runs a fetch from inside the gateway container (Compose network) and returns {status, body}.
+function insideGateway(path, {method = 'GET', body, headers = {}} = {}) {
+  const script = `fetch('http://127.0.0.1:8080${path}',{method:${JSON.stringify(method)},headers:Object.assign(${JSON.stringify(headers)},` +
+    `process.env.SMOKE_INTERNAL?{'x-internal-key':process.env.INTERNAL_API_KEY,'content-type':'application/json'}:{}),` +
+    `body:${body ? JSON.stringify(JSON.stringify(body)) : 'undefined'}}).then(async r=>console.log(JSON.stringify({status:r.status,body:await r.text()})))`;
+  const output = execFileSync('docker', ['compose', 'exec', '-T', '-e', `SMOKE_INTERNAL=${body ? '1' : ''}`, 'gateway-service', 'node', '-e', script],
+    {cwd: root, encoding: 'utf8'});
+  return JSON.parse(output.trim().split('\n').at(-1));
 }
-assert.ok(ready,'Keycloak room-care realm did not become ready within 60 seconds');
-try {
-  adminToken=await token('master',{grant_type:'password',client_id:'admin-cli',username:'admin',password:env.KEYCLOAK_ADMIN_PASSWORD});
-  console.log('PASS Keycloak administrator login');
-  await call(`${adminPath}/clients`,{token:adminToken,method:'POST',expected:201,body:{clientId,secret:clientSecret,enabled:true,serviceAccountsEnabled:true,standardFlowEnabled:false,protocolMappers:[
-    {name:'api-audience',protocol:'openid-connect',protocolMapper:'oidc-audience-mapper',config:{'included.custom.audience':'room-care-api','access.token.claim':'true'}},
-    {name:'roles',protocol:'openid-connect',protocolMapper:'oidc-usermodel-realm-role-mapper',config:{'claim.name':'roles','jsonType.label':'String',multivalued:'true','access.token.claim':'true'}}
-  ]}});
-  clientUuid=(await call(`${adminPath}/clients?clientId=${clientId}`,{token:adminToken}))[0].id;
-  const getToken=()=>token('room-care',{grant_type:'client_credentials',client_id:clientId,client_secret:clientSecret});
-  let access=await getToken();
-  await call(`${gateway}/api/notifications`,{expected:401});
-  const headers={token:access};
-  assert.deepEqual(await call(`${gateway}/api/notifications`,headers),[]);
-  await call(`${gateway}/api/notifications/send`,{...headers,method:'POST',expected:403,body:{}});
-  console.log('PASS real JWT validation and non-ADMIN rejection');
-  const user=await call(`${adminPath}/clients/${clientUuid}/service-account-user`,{token:adminToken});
-  const role=await call(`${adminPath}/roles/ADMIN`,{token:adminToken});
-  await call(`${adminPath}/users/${user.id}/role-mappings/realm`,{token:adminToken,method:'POST',expected:204,body:[role]});
-  access=await getToken();
-  const event={eventId:`smoke-${randomUUID()}`,userId:user.id,title:'Local smoke test',body:'Docker Redis dry-run verification',data:{source:'smoke'}};
-  await call(`${gateway}/api/push/token`,{token:access,method:'POST',expected:204,body:{token:'local-smoke-not-a-real-fcm-token'}});
-  const sent=await call(`${gateway}/api/notifications/send`,{token:access,method:'POST',body:event});
-  assert.equal(sent.status,'dry-run');assert.equal(sent.targetCount,1);
-  const duplicate=await call(`${gateway}/api/notifications/send`,{token:access,method:'POST',body:event});
-  assert.equal(duplicate.status,'duplicate');
-  const history=await call(`${gateway}/api/notifications`,{token:access});
-  assert.equal(history.length,1);assert.equal(history[0].id,event.eventId);
-  await call(`${gateway}/api/push/token`,{token:access,method:'DELETE',expected:204,body:{token:'local-smoke-not-a-real-fcm-token'}});
-  console.log('PASS Redis-backed token registration, ADMIN dry-run, deduplication, history and removal');
-  // Realm-provisioned client-credentials account for internal services (C server automation).
-  const automation=await fetch(`${auth}/realms/room-care/protocol/openid-connect/token`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},
-    body:new URLSearchParams({grant_type:'client_credentials',client_id:'room-care-automation',client_secret:env.AUTOMATION_CLIENT_SECRET??''}),signal:AbortSignal.timeout(10000)});
-  if(automation.ok){
-    const serviceToken=(await automation.json()).access_token;
-    const claims=JSON.parse(Buffer.from(serviceToken.split('.')[1],'base64url').toString());
-    assert.deepEqual(claims.roles,['NOTIFICATION_SENDER']);
-    const automated=await call(`${gateway}/api/notifications/send`,{token:serviceToken,method:'POST',body:{...event,eventId:`smoke-automation-${randomUUID()}`}});
-    assert.equal(automated.status,'dry-run');
-    console.log('PASS room-care-automation client credentials with NOTIFICATION_SENDER only');
-  } else {
-    console.log('SKIP room-care-automation: realm volume predates the client or AUTOMATION_CLIENT_SECRET differs (see docs/NODE_BACKEND.md)');
-  }
-  const health=await call(`${gateway}/actuator/health`);assert.equal(health.status,'UP');
-  // C 서버가 로컬에 없으면 readiness는 503이 정상이므로 Redis 구성 요소만 필수로 확인합니다.
-  const readiness=await fetch(`${gateway}/actuator/health/readiness`,{signal:AbortSignal.timeout(10000)});
-  const ready=await readiness.json();
-  assert.equal(ready.components.redis.status,'UP');
-  console.log(`PASS readiness (redis UP, cloud ${ready.components.cloud.status})`);
-  const metrics=await fetch(`${gateway}/actuator/prometheus`);assert.equal(metrics.status,200);
-  const metricsText=await metrics.text();
-  assert.ok(metricsText.includes('process_cpu'));
-  assert.ok(metricsText.includes('http_server_request_duration_seconds_bucket'));
-  assert.ok(metricsText.includes('gateway_notifications_total{status="dry-run"}'));
-  assert.ok(metricsText.includes('gateway_dependency_up{dependency="redis"} 1'));
-  console.log('PASS health and Prometheus metrics');
-} finally {
-  if(clientUuid&&adminToken){await call(`${adminPath}/clients/${clientUuid}`,{token:adminToken,method:'DELETE',expected:204});console.log('Removed temporary Keycloak smoke-test client');}
+
+const deadline = Date.now() + 60_000;
+let ready = false;
+while (Date.now() < deadline) {
+  try { if ((await fetch(`${base}/api/notifications`, {signal: AbortSignal.timeout(2000)})).ok) { ready = true; break; } }
+  catch { /* nginx or gateway may still be starting. */ }
+  await new Promise(resolve => setTimeout(resolve, 1000));
 }
+assert.ok(ready, 'nginx → gateway did not become ready within 60 seconds');
+
+assert.ok(Array.isArray(await call('/api/notifications')));
+await call('/internal/notifications', {method: 'POST', expected: 404, body: {}});
+await call('/actuator/prometheus', {expected: 404});
+console.log('PASS nginx serves /api without login and hides /internal and /actuator');
+
+const rejected = insideGateway('/internal/notifications', {method: 'POST', headers: {'x-internal-key': 'wrong-key'}});
+assert.equal(rejected.status, 401);
+const event = {eventId: `smoke-${randomUUID()}`, title: 'Local smoke test', body: 'Docker Redis dry-run verification', data: {source: 'smoke'}};
+await call('/api/push/token', {method: 'POST', expected: 204, body: {token: 'local-smoke-not-a-real-fcm-token'}});
+const sent = insideGateway('/internal/notifications', {method: 'POST', body: event});
+assert.equal(sent.status, 200);
+const result = JSON.parse(sent.body);
+assert.equal(result.status, 'dry-run'); assert.ok(result.targetCount >= 1);
+assert.equal(JSON.parse(insideGateway('/internal/notifications', {method: 'POST', body: event}).body).status, 'duplicate');
+assert.ok((await call('/api/notifications')).some(n => n.id === event.eventId));
+await call('/api/push/token', {method: 'DELETE', expected: 204, body: {token: 'local-smoke-not-a-real-fcm-token'}});
+console.log('PASS internal notification with X-Internal-Key, dry-run, deduplication, history and token removal');
+
+const readiness = JSON.parse(insideGateway('/actuator/health/readiness').body);
+assert.equal(readiness.components.redis.status, 'UP');
+console.log(`PASS readiness (redis UP, cloud ${readiness.components.cloud.status})`);
+const metrics = insideGateway('/actuator/prometheus').body;
+assert.ok(metrics.includes('gateway_notifications_total{status="dry-run"}'));
+assert.ok(metrics.includes('gateway_dependency_up{dependency="redis"} 1'));
+console.log('PASS Prometheus metrics');

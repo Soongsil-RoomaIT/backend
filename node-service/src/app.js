@@ -2,14 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { createServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Counter, Gauge, Histogram } from 'prom-client';
-import { bearer } from './security.js';
-
-// Roles allowed to call POST /api/notifications/send. NOTIFICATION_SENDER is granted only to the
-// room-care-automation client-credentials service account (see infra/keycloak/room-care-realm.json).
-export const SENDER_ROLES = ['ADMIN', 'NOTIFICATION_SENDER'];
 const API_SEGMENTS = new Set(['sensors', 'devices', 'edge', 'forecast', 'decisions', 'settings']);
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
 // Command deduplication key generated per button press by the web app; C rejects live commands without it.
@@ -17,7 +12,8 @@ const IDEMPOTENCY_KEY = /^[!-~]{1,200}$/;
 
 // Bounded route label so arbitrary request paths cannot explode Prometheus cardinality.
 export function routeLabel(path) {
-  if (['/actuator/health', '/actuator/health/liveness', '/actuator/health/readiness', '/actuator/prometheus', '/ws', '/api/push/token', '/api/notifications', '/api/notifications/send'].includes(path)) return path;
+  if (['/actuator/health', '/actuator/health/liveness', '/actuator/health/readiness', '/actuator/prometheus', '/ws', '/api/push/token', '/api/notifications', '/internal/notifications'].includes(path)) return path;
+  if (path.startsWith('/internal/')) return '/internal/other';
   const match = /^\/api\/([^/]+)/.exec(path);
   if (!match) return 'other';
   return API_SEGMENTS.has(match[1]) ? `/api/${match[1]}` : '/api/other';
@@ -63,11 +59,16 @@ function createMetrics(registry, readiness) {
   };
 }
 
-export function createApp({config, verify, notifications, logger, registry, checks = {}}) {
+const keyDigest = value => createHash('sha256').update(value).digest();
+
+export function createApp({config, notifications, logger, registry, checks = {}}) {
   const readiness = () => runChecks(checks, config.timeout);
   const metrics = createMetrics(registry, readiness);
+  const internalKey = config.internalKey ? keyDigest(config.internalKey) : null;
   const app = express();
   app.disable('x-powered-by');
+  // Behind the Compose nginx: rate limits use the browser address from X-Forwarded-For.
+  app.set('trust proxy', config.trustProxy ?? false);
   app.use((req, res, next) => {
     req.id = randomUUID(); res.set('X-Request-Id', req.id);
     const start = process.hrtime.bigint();
@@ -81,7 +82,7 @@ export function createApp({config, verify, notifications, logger, registry, chec
     next();
   });
   app.use(cors({origin: config.origins, credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'], exposedHeaders: ['X-Request-Id']}));
+    allowedHeaders: ['Content-Type', 'Idempotency-Key'], exposedHeaders: ['X-Request-Id']}));
   // Liveness only: the process is serving. Readiness additionally requires Redis and the C server.
   app.get(['/actuator/health', '/actuator/health/liveness'], (_req, res) => res.json({status: 'UP'}));
   app.get('/actuator/health/readiness', async (_req, res) => {
@@ -93,32 +94,36 @@ export function createApp({config, verify, notifications, logger, registry, chec
   });
   app.use(rateLimit({windowMs: 60_000, limit: 120, standardHeaders: 'draft-8', legacyHeaders: false}));
   app.use(express.json({limit: '64kb'}));
-  app.use(async (req, res, next) => {
-    try { req.user = await verify(bearer(req)); next(); }
-    catch { res.status(401).json({message: 'Invalid or missing access token'}); }
-  });
+  // No user login (SAD v1.2 single household): every browser request belongs to the single room user.
+  const user = config.roomUser;
   app.post('/api/push/token', async (req, res) => {
     const token = req.body?.token;
     if (typeof token !== 'string' || !token.trim() || token.length > 4096) return res.status(400).json({message: 'token must be a nonempty string'});
-    await notifications.register(req.user.sub, token); res.sendStatus(204);
+    await notifications.register(user, token); res.sendStatus(204);
   });
   app.delete('/api/push/token', async (req, res) => {
     if (typeof req.body?.token !== 'string' || !req.body.token) return res.status(400).json({message: 'token is required'});
-    await notifications.remove(req.user.sub, req.body.token); res.sendStatus(204);
+    await notifications.remove(user, req.body.token); res.sendStatus(204);
   });
-  app.get('/api/notifications', async (req, res) => res.json(await notifications.list(req.user.sub)));
-  app.post('/api/notifications/send', async (req, res) => {
-    const roles = req.user.roles ?? req.user.realm_access?.roles ?? [];
-    if (!SENDER_ROLES.some(role => roles.includes(role))) return res.status(403).json({message: 'ADMIN or NOTIFICATION_SENDER role required'});
+  app.get('/api/notifications', async (_req, res) => res.json(await notifications.list(user)));
+  // Cloud Server only: Compose-internal network, shared secret header. nginx never proxies /internal.
+  app.post('/internal/notifications', async (req, res) => {
+    if (!internalKey) return res.status(503).json({message: 'INTERNAL_API_KEY is not configured'});
+    const key = req.get('x-internal-key');
+    if (typeof key !== 'string' || !timingSafeEqual(keyDigest(key), internalKey)) return res.status(401).json({message: 'Invalid internal key'});
     const event = req.body;
-    if (!event || ['eventId','userId','title','body'].some(key => typeof event[key] !== 'string' || !event[key].trim() || event[key].length > 4096)
+    if (!event || ['eventId','title','body'].some(k => typeof event[k] !== 'string' || !event[k].trim() || event[k].length > 4096)
       || (event.data !== undefined && (event.data === null || Array.isArray(event.data) || typeof event.data !== 'object' || Object.values(event.data).some(v => typeof v !== 'string')))) {
       return res.status(400).json({message: 'Invalid notification event'});
     }
     let result;
-    try { result = await notifications.send(event); }
+    try { result = await notifications.send({eventId: event.eventId, userId: user, title: event.title, body: event.body, data: event.data}); }
     catch (error) { metrics.notifications.inc({status: 'error'}); throw error; }
     metrics.notifications.inc({status: result.status});
+    if (result.status !== 'duplicate') {
+      const {eventId: _eventId, ...notification} = result;
+      broadcast({type: 'notification.new', payload: notification});
+    }
     res.json(result);
   });
   app.use('/api', async (req, res) => {
@@ -129,7 +134,6 @@ export function createApp({config, verify, notifications, logger, registry, chec
       url.pathname = req.originalUrl.split('?')[0];
       url.search = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       const headers = {'x-request-id': req.id};
-      if (bearer(req)) headers.authorization = `Bearer ${bearer(req)}`;
       const idempotencyKey = req.get('idempotency-key');
       if (idempotencyKey !== undefined) {
         if (!IDEMPOTENCY_KEY.test(idempotencyKey)) return res.status(400).json({message: 'Invalid Idempotency-Key', requestId: req.id});
@@ -156,27 +160,28 @@ export function createApp({config, verify, notifications, logger, registry, chec
   });
   const server = createServer(app);
   const wss = new WebSocketServer({noServer: true, maxPayload: 64*1024});
+  // Gateway-originated events (notification.new) go to every open browser socket, with or without FCM.
+  function broadcast(message) {
+    const text = JSON.stringify(message);
+    for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(text);
+  }
   server.on('upgrade', (req, socket, head) => {
-    if (req.url !== '/ws' || !config.origins.includes(req.headers.origin)) {
+    // Allowed: configured dev origins (Vite) or the same origin the Compose nginx serves the web app from.
+    const origin = req.headers.origin;
+    let sameOrigin = false;
+    try { sameOrigin = new URL(origin).host === req.headers.host; } catch { /* Missing or invalid Origin. */ }
+    if (req.url !== '/ws' || !(config.origins.includes(origin) || sameOrigin)) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws));
   });
   wss.on('connection', client => {
     metrics.wsClients.inc();
-    let upstream, heartbeat, expiry, started = false, authenticated = false;
-    const authTimeout = setTimeout(() => client.close(1008, 'Authentication timeout'), 5000);
+    let upstream, heartbeat;
     const send = value => { if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(value)); };
-    const start = async token => {
-      if (started) return;
-      started = true;
+    const start = async () => {
       try {
-        const user = await verify(token);
-        authenticated = true;
-        clearTimeout(authTimeout);
-        expiry = setTimeout(() => client.close(1008, 'Token expired'), Math.min((user.exp*1000-Date.now()), 2147483647));
-        const headers = token ? {authorization: `Bearer ${token}`} : {};
-        const response = await fetch(new URL('/api/edge/status', config.cloud), {headers, signal: AbortSignal.timeout(config.timeout)});
+        const response = await fetch(new URL('/api/edge/status', config.cloud), {signal: AbortSignal.timeout(config.timeout)});
         if (!response.ok) throw new Error('Edge status unavailable');
         const status = await response.json();
         if (typeof status.online !== 'boolean' || typeof status.offlineMode !== 'boolean' || typeof status.lastSeenAt !== 'string') throw new Error('Invalid EdgeStatus');
@@ -184,7 +189,7 @@ export function createApp({config, verify, notifications, logger, registry, chec
         send({type: 'edge.status', payload: status});
         heartbeat = setInterval(() => send({type: 'heartbeat'}), config.heartbeat);
         const url = new URL('/ws', config.cloud); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-        upstream = new WebSocket(url, {headers, handshakeTimeout: config.timeout});
+        upstream = new WebSocket(url, {handshakeTimeout: config.timeout});
         upstream.on('message', (data, binary) => {
           if (binary || client.readyState !== WebSocket.OPEN) return;
           try {
@@ -195,25 +200,23 @@ export function createApp({config, verify, notifications, logger, registry, chec
         upstream.on('error', () => { metrics.upstreamFailures.inc({transport: 'ws'}); client.close(1011, 'Cloud WebSocket unavailable'); });
         upstream.on('close', () => client.close(1011, 'Cloud WebSocket disconnected'));
       } catch {
-        if (authenticated) metrics.upstreamFailures.inc({transport: 'ws'});
-        client.close(1011, 'Authentication or cloud connection failed');
+        metrics.upstreamFailures.inc({transport: 'ws'});
+        client.close(1011, 'Cloud connection failed');
       }
     };
     client.on('message', (raw, binary) => {
       if (binary) return;
       try {
-        const message = JSON.parse(raw.toString());
-        if (message.type === 'auth' && typeof message.payload?.token === 'string') void start(message.payload.token);
-        else if (message.type === 'ping' && heartbeat) send({type: 'heartbeat'});
+        if (JSON.parse(raw.toString()).type === 'ping' && heartbeat) send({type: 'heartbeat'});
       } catch { /* Ignore malformed client frames. */ }
     });
     client.on('error', () => client.close());
     client.on('close', () => {
       metrics.wsClients.dec();
-      clearTimeout(authTimeout); clearTimeout(expiry); clearInterval(heartbeat);
+      clearInterval(heartbeat);
       upstream?.close();
     });
-    if (config.devAuth) void start();
+    void start();
   });
   return {app, server, wss};
 }

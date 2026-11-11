@@ -1,3 +1,8 @@
+# 자취방 원격 케어 시스템 클라우드 VM 구성 (SAD v1.2 ADR-016, 7.1)
+# 외부 공개 포트는 nginx 80(웹·API)과 Mosquitto 8883(MQTT TLS)뿐입니다.
+# Gateway·Cloud Server·PostgreSQL·Redis는 Compose 내부망에만 있고, Prometheus는 127.0.0.1에만 엽니다.
+# backend, cloud-server, frontend 저장소를 같은 폴더에 나란히 둡니다(경로는 .env로 바꿀 수 있음).
+#
 # 모든 컨테이너 로그는 json-file 드라이버로 10MB x 3개까지만 보관합니다(디스크 보호).
 # 장기 로그 조회·보존은 observability 프로필의 Loki(7일)를 사용합니다.
 x-logging: &default-logging
@@ -7,17 +12,97 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
+  nginx:
+    logging: *default-logging
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # frontend 저장소에서 npm run build로 만든 정적 파일
+      - ${WEB_DIST_DIR:-../frontend/dist}:/usr/share/nginx/html:ro
+    depends_on:
+      gateway-service:
+        condition: service_healthy
+
+  gateway-service:
+    logging: *default-logging
+    build: ./node-service
+    environment:
+      NODE_ENV: production
+      # Vite 개발 서버 등 다른 출처만 적습니다. nginx가 제공하는 같은 출처는 자동 허용됩니다.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      TRUST_PROXY: uniquelocal
+      REDIS_URL: redis://redis:6379
+      DATA_ENCRYPTION_KEY_BASE64: ${DATA_ENCRYPTION_KEY_BASE64:?DATA_ENCRYPTION_KEY_BASE64 is required (run node node-service/scripts/setup-env.js)}
+      # 로그인 기능이 없으므로 웹의 모든 요청은 이 한 명의 방 사용자로 처리됩니다.
+      ROOM_USER_ID: ${ROOM_USER_ID:-room-user}
+      # Cloud Server가 POST /internal/notifications에 X-Internal-Key로 보내는 공유 비밀값
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required (run node node-service/scripts/setup-env.js)}
+      CLOUD_SERVICE_URL: http://cloud-server:3000
+      CLOUD_HEALTH_PATH: /health
+      FCM_ENABLED: ${FCM_ENABLED:-false}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase-service-account.json
+    volumes:
+      - ./secrets:/run/secrets:ro
+    # 생존(liveness)만 검사합니다. C 서버 장애로 Gateway 컨테이너가 재시작되지 않도록 readiness는 경보로만 다룹니다.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/actuator/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  cloud-server:
+    logging: *default-logging
+    # C 담당 cloud-server 저장소를 그대로 빌드합니다(저장소에 Dockerfile이 없어 여기서 정의).
+    build:
+      context: ${CLOUD_SERVER_DIR:-../cloud-server}
+      dockerfile_inline: |
+        FROM node:22-alpine
+        WORKDIR /app
+        COPY package*.json ./
+        RUN npm ci --omit=dev --ignore-scripts
+        COPY src ./src
+        COPY database ./database
+        COPY public ./public
+        USER node
+        EXPOSE 3000
+        CMD ["node", "src/server.js"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DEMO_MODE: "false"
+      DATABASE_URL: postgresql://roomait:${POSTGRES_PASSWORD}@postgres:5432/roomait
+      MQTT_URL: mqtt://mosquitto:1883
+      MQTT_USERNAME: cloud-server
+      MQTT_PASSWORD: ${MQTT_CLOUD_PASSWORD:?MQTT_CLOUD_PASSWORD is required (run node node-service/scripts/setup-env.js)}
+      MQTT_TOPIC_PREFIX: roomcare/${EDGE_DEVICE_ID:-room-001}
+      MQTT_PROTOCOL: ${MQTT_PROTOCOL:-roomait-v1}
+      CORS_ORIGINS: http://gateway-service:8080
+      KMA_SERVICE_KEY: ${KMA_SERVICE_KEY:-}
+      # Gateway 내부 알림 API(SAD 10.3). C 서버가 X-Internal-Key 방식을 지원하면 사용합니다.
+      GATEWAY_INTERNAL_NOTIFICATIONS_URL: http://gateway-service:8080/internal/notifications
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+
   postgres:
     logging: *default-logging
     image: postgres:15-alpine
     environment:
-      POSTGRES_DB: keycloak
-      POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: roomait
+      POSTGRES_USER: roomait
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - cloud-db:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      test: ["CMD-SHELL", "pg_isready -U roomait -d roomait"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -34,80 +119,32 @@ services:
       timeout: 3s
       retries: 20
 
-  keycloak:
+  mosquitto:
     logging: *default-logging
-    image: quay.io/keycloak/keycloak:26.0
-    command: ["start-dev", "--import-realm"]
+    image: eclipse-mosquitto:2.0.20
     environment:
-      KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
-      KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
-      KC_HEALTH_ENABLED: "true"
-      KC_HOSTNAME: http://localhost:8180
-      # realm import 파일의 ${AUTOMATION_CLIENT_SECRET} 자리표시자를 채웁니다.
-      AUTOMATION_CLIENT_SECRET: ${AUTOMATION_CLIENT_SECRET:?AUTOMATION_CLIENT_SECRET is required (run node node-service/scripts/setup-env.js)}
+      EDGE_DEVICE_ID: ${EDGE_DEVICE_ID:-room-001}
+      MQTT_EDGE_PASSWORD: ${MQTT_EDGE_PASSWORD:?MQTT_EDGE_PASSWORD is required (run node node-service/scripts/setup-env.js)}
+      MQTT_CLOUD_PASSWORD: ${MQTT_CLOUD_PASSWORD}
+    # 엣지 계정의 사용자명은 deviceId입니다(ACL: roomcare/{deviceId}/#). 비밀번호 파일은 시작할 때마다 다시 만듭니다.
+    command:
+      - sh
+      - -c
+      - >-
+        mosquitto_passwd -c -b /mosquitto/data/passwd "$$EDGE_DEVICE_ID" "$$MQTT_EDGE_PASSWORD" &&
+        mosquitto_passwd -b /mosquitto/data/passwd cloud-server "$$MQTT_CLOUD_PASSWORD" &&
+        cp /mosquitto/config/acl /mosquitto/data/acl &&
+        chown mosquitto:mosquitto /mosquitto/data/passwd /mosquitto/data/acl &&
+        chmod 0700 /mosquitto/data/passwd /mosquitto/data/acl &&
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
     ports:
-      - "8180:8080"
+      - "8883:8883"
     volumes:
-      - ./infra/keycloak/room-care-realm.json:/opt/keycloak/data/import/room-care-realm.json:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  notification-service:
-    logging: *default-logging
-    profiles: ["legacy-java"]
-    build: ./notification-service
-    environment:
-      REDIS_HOST: redis
-      JWT_ISSUER_URI: http://localhost:8180/realms/room-care
-      JWT_JWK_SET_URI: http://keycloak:8080/realms/room-care/protocol/openid-connect/certs
-      DATA_ENCRYPTION_KEY_BASE64: ${DATA_ENCRYPTION_KEY_BASE64}
-      FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH:-}
-    ports:
-      - "8082:8082"
-    volumes:
-      - ./secrets:/run/secrets:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-      keycloak:
-        condition: service_started
-
-  gateway-service:
-    logging: *default-logging
-    build: ./node-service
-    environment:
-      NODE_ENV: ${NODE_ENV:-production}
-      DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-false}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
-      REDIS_URL: redis://redis:6379
-      DATA_ENCRYPTION_KEY_BASE64: ${DATA_ENCRYPTION_KEY_BASE64}
-      JWT_AUDIENCE: room-care-api
-      JWT_ISSUER_URI: http://localhost:8180/realms/room-care
-      JWT_JWK_SET_URI: http://keycloak:8080/realms/room-care/protocol/openid-connect/certs
-      CLOUD_SERVICE_URL: ${CLOUD_SERVICE_URL:-http://host.docker.internal:8081}
-      CLOUD_HEALTH_PATH: ${CLOUD_HEALTH_PATH:-/health}
-      FCM_ENABLED: ${FCM_ENABLED:-false}
-      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase-service-account.json
-    volumes:
-      - ./secrets:/run/secrets:ro
-    ports:
-      - "8080:8080"
-    # 생존(liveness)만 검사합니다. C 서버 장애로 Gateway 컨테이너가 재시작되지 않도록 readiness는 경보로만 다룹니다.
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/actuator/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-    depends_on:
-      redis:
-        condition: service_healthy
-      keycloak:
-        condition: service_started
+      - ./infra/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./infra/mosquitto/acl:/mosquitto/config/acl:ro
+      # infra/mosquitto/gen-certs.sh로 만든 CA·서버 인증서
+      - ./secrets/mosquitto:/mosquitto/certs:ro
+      - mosquitto-data:/mosquitto/data
 
   prometheus:
     logging: *default-logging
@@ -121,14 +158,16 @@ services:
       - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - gateway-service
-      - alertmanager
 
+  # ---- alerting 프로필(선택): docker compose --profile alerting up ----
+  # SAD v1.2는 경보를 Prometheus 화면에서 확인합니다. 팀 채널 통지가 필요할 때만 켭니다.
   alertmanager:
     logging: *default-logging
     image: prom/alertmanager:v0.27.0
+    profiles: ["alerting"]
     command:
       - --config.file=/etc/alertmanager/alertmanager.yml
       - --storage.path=/alertmanager
@@ -141,19 +180,7 @@ services:
     ports:
       - "127.0.0.1:9093:9093"
 
-  tls-proxy:
-    logging: *default-logging
-    image: nginx:1.27-alpine
-    profiles: ["tls"]
-    ports:
-      - "443:443"
-    volumes:
-      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./infra/nginx/certs:/etc/nginx/certs:ro
-    depends_on:
-      - gateway-service
-
-  # ---- observability 프로필: docker compose --profile observability up ----
+  # ---- observability 프로필(선택): docker compose --profile observability up ----
   loki:
     image: grafana/loki:3.2.1
     profiles: ["observability"]
@@ -199,11 +226,11 @@ services:
       - loki
 
 volumes:
-  postgres-data:
+  cloud-db:
   redis-data:
+  mosquitto-data:
   prometheus-data:
   alertmanager-data:
   loki-data:
   alloy-data:
   grafana-data:
-

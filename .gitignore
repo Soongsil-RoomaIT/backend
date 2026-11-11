@@ -4,6 +4,4 @@ node_modules/
 npm-debug.log
 .npm-cache/
 secrets/
-infra/nginx/certs/*.pem
-!.gitkeep
 

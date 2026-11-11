@@ -1,82 +1,55 @@
-# D 백엔드 인프라 구현
+# D 백엔드 인프라
 
-현재 기본 구현은 `node-service`의 Node.js Gateway 및 알림 모듈입니다.
-실행·연동 방법은 [Node.js 연동 가이드](docs/NODE_BACKEND.md)를 따르세요.
-아래 내용은 기존 Java 구현 참고 자료이며 기본 배포 구성과 다릅니다.
+자취방 원격 케어 시스템(SAD v1.2)의 D 역할 저장소입니다. 클라우드 VM 1대의 Docker Compose로
+nginx, Node.js Gateway(`node-service`), Cloud Server(C), MQTT 브로커(Mosquitto), PostgreSQL, Redis, Prometheus를 함께 실행합니다.
 
-자취방 원격 케어 시스템 SAD의 D 역할을 위한 시작 구현입니다. 인증과 인가, API Gateway, 푸시 알림, 전송·저장 암호화, 배포와 관측성 구성을 한 폴더에 모았습니다.
+> **로그인 기능과 Keycloak은 사용하지 않습니다.** 웹은 인증 없이 Gateway를 사용하고 모든 요청은 방 사용자 한 명(`ROOM_USER_ID`)으로 처리됩니다.
+> 그래서 80번 포트에 접속할 수 있는 사람은 누구나 기기를 제어할 수 있으므로, 시연은 신뢰할 수 있는 망에서만 합니다.
+> Cloud Server → Gateway 알림은 내부망 전용 `POST /internal/notifications` + `X-Internal-Key`입니다.
+
+실행·연동 방법은 [D 백엔드 인프라 가이드](docs/NODE_BACKEND.md)를 따르세요.
 
 ## 포함 범위
 
-- `gateway-service`: Keycloak이 발급한 JWT를 검증하고 내부 서비스로 요청을 전달합니다.
-- `notification-service`: 사용자별 FCM 토큰을 AES-256-GCM으로 암호화해 Redis에 저장하고 알림 요청의 중복 전송을 차단합니다.
-- `infra/keycloak`: 개발용 OAuth2/OIDC realm, 클라이언트, 역할 정의입니다.
-- `infra/prometheus`: 두 서비스의 Actuator 지표 수집 설정입니다.
-- `infra/nginx`: TLS 1.3 종료를 위한 선택 실행 프로필입니다.
-- `compose.yaml`: Keycloak, PostgreSQL 15, Redis, Gateway, 알림 서비스, Prometheus를 함께 실행합니다.
+| 경로 | 내용 |
+| --- | --- |
+| `compose.yaml` | 전체 구성. 외부 공개 포트는 nginx 80과 Mosquitto 8883(TLS)뿐 |
+| `node-service` | Gateway: REST·WebSocket 중계, 알림 이력·FCM(선택)·중복 차단, 내부 알림 API, Prometheus 지표 |
+| `infra/nginx` | 웹 정적 파일 제공, /api·/ws 중계, /internal·/actuator 차단 |
+| `infra/mosquitto` | 브로커 설정, ACL, TLS 인증서 생성 스크립트 |
+| `infra/prometheus` | 지표 수집과 경보 규칙 |
+| `infra/alertmanager` | 팀 채널 경보 통지 (선택 `alerting` 프로필) |
+| `infra/grafana`, `infra/loki`, `infra/alloy` | 대시보드·로그 수집 (선택 `observability` 프로필) |
+| `gateway-service`, `notification-service` | v1.1 Java 구현 참고 자료(ADR-004, 사용하지 않음) |
 
-## 사전 준비
+## 빠른 실행
 
-1. `.env.example`을 `.env`로 복사합니다.
-2. `DATA_ENCRYPTION_KEY_BASE64`를 32바이트 임의 키의 Base64 값으로 교체합니다.
-3. 실제 FCM 전송 시 Firebase 서비스 계정 JSON을 `secrets/firebase-service-account.json`에 둡니다.
+backend, cloud-server, frontend 저장소를 같은 폴더에 나란히 둡니다.
 
-PowerShell에서 32바이트 키 생성 예시:
-
-```powershell
-[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+```bash
+node node-service/scripts/setup-env.js
+sh infra/mosquitto/gen-certs.sh
+docker compose up -d --build
+node node-service/scripts/smoke-docker.js
 ```
 
-## 실행
-
-```powershell
-docker compose up --build
-```
-
-기본 상태 확인 주소:
-
-- Gateway: `http://localhost:8080/actuator/health`
-- Notification: `http://localhost:8082/actuator/health`
-- Keycloak: `http://localhost:8180` (`admin` / `.env`의 비밀번호)
-- Prometheus: `http://localhost:9090`
-
-FCM 자격 증명이 없으면 알림 서비스는 안전한 `dry-run` 모드로 시작하며 전송 요청의 구조와 중복 방지만 검증합니다.
-
-## 개발용 토큰과 호출 흐름
-
-Keycloak realm은 `room-care`, 공개 클라이언트는 `room-care-web`입니다. 사용자 역할은 `USER`, 운영 역할은 `ADMIN`입니다. 초기 사용자는 Keycloak 관리 화면에서 직접 만들고 역할을 부여합니다. 실제 운영에서는 외부 IdP 또는 별도 가입 흐름으로 교체해야 합니다.
-
-알림 API는 Gateway의 `/api/notifications/**` 경로로만 노출합니다.
-
-- `POST /api/notifications/devices`: 본인의 FCM 토큰 등록
-- `DELETE /api/notifications/devices/{token}`: 본인의 FCM 토큰 삭제
-- `POST /api/notifications/send`: `ADMIN` 또는 내부 서비스용 알림 발송
-
-`send` 요청의 `eventId`는 중복 방지 키입니다. 같은 이벤트는 Redis TTL 동안 한 번만 처리됩니다.
-
-## TLS 1.3
-
-인증서와 개인 키를 각각 `infra/nginx/certs/fullchain.pem`, `infra/nginx/certs/privkey.pem`에 둔 다음 실행합니다.
-
-```powershell
-docker compose --profile tls up --build
-```
-
-운영 환경에서는 클라우드 Load Balancer 또는 관리형 API Gateway에서 TLS를 종료하고, 내부망도 가능하면 mTLS로 보호합니다. 저장 데이터의 키는 `.env` 대신 KMS 또는 Secret Manager에서 주입해야 합니다.
+- 웹: http://localhost (frontend에서 `npm run build`한 결과를 제공)
+- Prometheus: http://127.0.0.1:9090
 
 ## 다음 연동 지점
 
-- [ ] C 역할의 Cloud Server 주소를 `CLOUD_SERVICE_URL`에 연결
-- [ ] E 역할의 Web App에 Keycloak Authorization Code + PKCE 로그인 적용
-- [x] 내부 서비스가 알림을 호출할 수 있도록 client credentials 클라이언트 분리
-  — realm의 `room-care-automation` + `NOTIFICATION_SENDER` 역할 ([가이드](docs/NODE_BACKEND.md#내부-서비스-알림-호출-client-credentials))
-- [x] Grafana/Loki 대시보드와 로그 보존 정책 추가
-  — `docker compose --profile observability up`, Loki 7일·Prometheus 15일 보존 ([가이드](docs/NODE_BACKEND.md#grafanaloki))
-- [ ] C 담당에 `AUTOMATION_CLIENT_SECRET` 전달 및 자동화 이벤트에서 알림 API 호출 연동
-- [x] Alertmanager 연결로 경보 외부 통지, Redis·C 서버 readiness 검사 추가
-  — `/actuator/health/readiness`, `gateway_dependency_up` 지표, Slack 호환 Webhook 통지 ([가이드](docs/NODE_BACKEND.md#alertmanager))
-- [x] C 서버 연동 요청 반영: 기기 명령 `Idempotency-Key` 전달·CORS 허용, `CLOUD_HEALTH_PATH=/health`
-  — cloud-server `docs/TEAM_INTEGRATION.md`의 D 요청사항
-- [ ] 팀 채널 Webhook URL을 `secrets/alertmanager/slack-webhook-url`에 저장
+- [x] C Cloud Server를 같은 Compose에서 실행 (`http://cloud-server:3000`, PostgreSQL·Mosquitto 연결)
+- [x] ~~Keycloak 로그인~~ — 로그인 기능 제거, Keycloak 삭제 ([인증 정책](docs/NODE_BACKEND.md#인증-정책-로그인-없음))
+- [x] 내부 알림 API `POST /internal/notifications` (X-Internal-Key) 와 WebSocket `notification.new`
+- [x] Mosquitto: 계정·ACL·TLS 8883 ([가이드](docs/NODE_BACKEND.md#mqtt-브로커-mosquitto))
+- [x] nginx 80에서 웹·API 제공, 내부 경로 차단
+- [x] Grafana/Loki 대시보드와 로그 보존 정책 (선택 프로필)
+- [x] Alertmanager 경보 통지 (선택 프로필), Redis·C 서버 readiness 검사
+- [x] C 서버 연동 요청 반영: 기기 명령 `Idempotency-Key` 전달, `CLOUD_HEALTH_PATH=/health`
+- [ ] C 담당: 알림 연동을 `GATEWAY_INTERNAL_NOTIFICATIONS_URL` + `X-Internal-Key` 방식으로 변경, 사용자 JWT 검증 제거
+- [ ] A 담당: edge_agent에 MQTT CA 파일 옵션 추가(또는 Pi에 CA 등록), 계정 `room-001`·TLS 8883 사용
+- [ ] E 담당: 로그인 화면 없이 같은 출처(nginx)로 빌드, `notification.new` 표시
+- [ ] SAD v1.2 문서의 인증 부분(6.1, ADR-014, 10.3 `/api/auth/login`·WS auth) 수정 — 로그인 제거 반영
+- [ ] VM 확보와 방화벽(80, 8883만 허용), 과금 알림 설정
+- [ ] AI 학습 스크립트 (SAD 4.1, D 담당)
 - [ ] 알림 목록·읽음 API 계약을 C·E와 확정 (D: id/title/body/data/status, C: message/read/pushStatus)
-
