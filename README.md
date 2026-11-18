@@ -53,5 +53,5 @@ node node-service/scripts/smoke-docker.js
 - [x] SAD v1.3: 웹 로그인 제거(ADR-019) 반영
 - [ ] C 담당 (요청 사항 C-1~C-4): 측정값 null 허용, v1.2 API 4종, 알림을 `GATEWAY_INTERNAL_NOTIFICATIONS_URL` + `X-Internal-Key`로 전송, 기기 초기값·상태 출처
 - [ ] A 담당: edge_agent에 MQTT CA 파일 옵션 추가(또는 Pi에 CA 등록), 계정 `room-001`·TLS 8883 사용
-- [ ] VM 확보와 방화벽(80, 8883만 허용), 과금 알림 설정
+- [x] VM 확보와 방화벽(80, 8883만 허용), 과금 알림 설정 — Azure for Students Korea Central B2ls_v2 ([VM 배포](docs/NODE_BACKEND.md#azure-vm-배포-2026-11-18-구성))
 - [ ] AI 학습 스크립트 (SAD 4.1, D 담당)

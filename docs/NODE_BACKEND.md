@@ -49,6 +49,34 @@ Gateway만 직접 실행하려면 Node.js 22 이상과 Redis를 준비하고 nod
 이때 `REDIS_URL`, `CLOUD_SERVICE_URL`, `DATA_ENCRYPTION_KEY_BASE64`, `INTERNAL_API_KEY`를 환경 변수로 지정합니다.
 검증은 `npm test`입니다. 사용하지 않는 선택 의존성인 Firebase Firestore/Storage는 설치에서 제외합니다.
 
+### Azure VM 배포 (2026-11-18 구성)
+
+| 항목 | 값 |
+| --- | --- |
+| 구독 / 리소스 그룹 / VM | Azure for Students / `roomcare-rg` / `roomcare-vm` |
+| 지역 / 크기 | Korea Central / Standard_B2ls_v2 (2코어 4GB). B2s는 이 지역 재고가 없어 생성 실패 |
+| OS / 디스크 | Ubuntu 24.04 LTS / 표준 SSD 30GB |
+| 접속 | `ssh azureuser@<공용 IP>` (D 담당 PC의 SSH 키). 코드는 `~/roomcare/{backend,cloud-server,frontend}` |
+| 방화벽(NSG) | 80·8883은 인터넷 허용, 22는 D 담당 IP만. IP가 바뀌면 NSG의 `Allow-SSH-MyIP` 규칙을 고침 |
+| 비용 | 예산 `roomcare-monthly` 월 $20, 50·80·100%에서 이메일 알림. 쓰지 않을 때는 VM 중지 |
+
+VM에는 Node.js를 설치하지 않고 Docker 컨테이너로 스크립트와 빌드를 실행합니다.
+
+```bash
+cd ~/roomcare/backend
+sudo docker run --rm -v "$PWD":/w -w /w -u $(id -u):$(id -g) node:22-alpine node node-service/scripts/setup-env.js
+sh infra/mosquitto/gen-certs.sh <공용 IP>
+# frontend의 package-lock.json은 npm 11 기준이라 Node 24 이미지로 빌드합니다(npm 10의 npm ci는 실패).
+# compose를 먼저 띄웠다면 nginx가 root 소유 빈 dist를 만들어 두므로 sudo rm -rf ../frontend/dist 후 빌드합니다.
+cd ../frontend && sudo docker run --rm -v "$PWD":/app -w /app -u $(id -u):$(id -g) -e npm_config_cache=/tmp/.npm node:24-alpine sh -c "npm ci && npm run build"
+cd ../backend && sudo docker compose up -d --build
+# 스모크 테스트 (Compose 프로젝트 이름을 backend로 맞춤)
+sudo docker run --rm --network host -e COMPOSE_PROJECT_NAME=backend -v "$PWD":/w -w /w -v /var/run/docker.sock:/var/run/docker.sock docker:cli sh -c "apk add -q nodejs && node node-service/scripts/smoke-docker.js"
+```
+
+업데이트는 각 저장소에서 `git pull` 후 같은 빌드·`docker compose up -d --build`를 다시 실행합니다(웹이 바뀌었으면 nginx 재시작).
+라즈베리파이용 `ca.crt`는 VM의 `secrets/mosquitto/ca.crt`, 엣지 비밀번호는 VM `.env`의 `MQTT_EDGE_PASSWORD`입니다.
+
 `smoke-docker.js`는 nginx(80)를 거친 공개 경로와, Gateway 컨테이너 안에서 내부 경로(/internal, /actuator)를 검증합니다.
 실제 FCM 전송 없이 dry-run 알림 이력을 남깁니다.
 
