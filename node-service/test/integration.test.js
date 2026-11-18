@@ -165,6 +165,8 @@ test('internal notifications need X-Internal-Key, target the room user, broadcas
   close(cloud);
   assert.equal((await fetch(base+'/api/edge/status')).status,502);
   await fetch(base+'/api/random-'+Math.random());
+  await fetch(base+'/api/recommendations/r-1/apply',{method:'POST'});
+  await fetch(base+'/api/outdoor');
   await fetch(base+'/internal/random-'+Math.random(),{method:'POST'});
   const text=await (await fetch(base+'/actuator/prometheus')).text();
   assert.match(text,/gateway_notifications_total\{status="dry-run"\} 1/);
@@ -174,6 +176,8 @@ test('internal notifications need X-Internal-Key, target the room user, broadcas
   assert.match(text,/method="POST",route="\/internal\/notifications",status_code="401"/);
   assert.match(text,/route="\/api\/edge",status_code="502"/);
   assert.match(text,/route="\/api\/other"/);
+  assert.match(text,/method="POST",route="\/api\/recommendations",status_code="502"/);
+  assert.match(text,/route="\/api\/outdoor",status_code="502"/);
   assert.match(text,/route="\/internal\/other"/);
   assert.doesNotMatch(text,/random-/);
 });

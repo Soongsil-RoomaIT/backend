@@ -5,7 +5,9 @@ import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Counter, Gauge, Histogram } from 'prom-client';
-const API_SEGMENTS = new Set(['sensors', 'devices', 'edge', 'forecast', 'decisions', 'settings']);
+// Cloud Server routes in use (frontend, cloud-server) and planned in SAD v1.2 appendix 10.3.
+const API_SEGMENTS = new Set(['sensors', 'devices', 'edge', 'commands', 'forecast', 'decisions', 'settings',
+  'notifications', 'outdoor', 'recommendations', 'automation']);
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
 // Command deduplication key generated per button press by the web app; C rejects live commands without it.
 const IDEMPOTENCY_KEY = /^[!-~]{1,200}$/;

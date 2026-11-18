@@ -194,7 +194,7 @@ JSON 로그는 requestId/메서드/경로 라벨/상태/소요 시간만 기록�
 ### 지표
 
 /actuator/prometheus는 Node.js 기본 지표와 아래 Gateway 지표를 제공합니다.
-경로 라벨은 알려진 경로(/api/sensors, /api/devices, /api/edge, /api/notifications/send 등)와 /api/other로 제한해
+경로 라벨은 알려진 경로(/api/sensors, /api/devices, /api/edge, /api/commands, /api/forecast, /api/outdoor, /api/recommendations, /api/automation, /internal/notifications 등)와 /api/other로 제한해
 임의 URL이 시계열을 늘리지 못하게 합니다.
 
 | 지표 | 라벨 | 의미 |
