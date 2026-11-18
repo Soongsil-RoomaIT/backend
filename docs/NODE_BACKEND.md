@@ -2,7 +2,7 @@
 
 클라우드 VM 1대의 Docker Compose로 nginx, Node.js Gateway, Cloud Server(C), MQTT 브로커,
 PostgreSQL, Redis, Prometheus를 함께 실행합니다(ADR-013, ADR-016).
-**로그인 기능과 Keycloak은 사용하지 않습니다.** 작업 브랜치는 minjae입니다.
+**로그인 기능과 Keycloak은 사용하지 않습니다.** 작업 브랜치는 main입니다(이전 minjae 브랜치는 main과 같은 내용으로 보관).
 
 ## 구성
 
