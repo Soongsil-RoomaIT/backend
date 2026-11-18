@@ -1,4 +1,4 @@
-# D 백엔드 인프라 (SAD v1.2)
+# D 백엔드 인프라 (SAD v1.3)
 
 클라우드 VM 1대의 Docker Compose로 nginx, Node.js Gateway, Cloud Server(C), MQTT 브로커,
 PostgreSQL, Redis, Prometheus를 함께 실행합니다(ADR-013, ADR-016).
@@ -36,7 +36,7 @@ backend, cloud-server, frontend 저장소를 같은 폴더에 나란히 클론�
 node node-service/scripts/setup-env.js
 # 2) MQTT TLS 인증서 만들기 (VM이면 공인 IP나 호스트 이름을 인자로)
 sh infra/mosquitto/gen-certs.sh 203.0.113.10
-# 3) 웹 빌드 (frontend 저장소에서, VITE_API_BASE_URL·VITE_WS_URL은 비우거나 같은 주소)
+# 3) 웹 빌드 (frontend 저장소에서, .env 없이 빌드하면 같은 출처를 씀)
 cd ../frontend && npm ci && npm run build && cd ../backend
 # 4) 전체 실행
 docker compose up -d --build
@@ -54,7 +54,7 @@ Gateway만 직접 실행하려면 Node.js 22 이상과 Redis를 준비하고 nod
 
 ## 인증 정책 (로그인 없음)
 
-1인 자취방 시스템이라 웹 앱에는 로그인 화면이 없습니다. SAD v1.2의 단일 계정 로그인(6.1, ADR-014)도 쓰지 않습니다.
+1인 자취방 시스템이라 웹 앱에는 로그인 화면이 없습니다(SAD v1.3 6.1, ADR-019). 주소는 팀 내부에만 공유하고 쓰지 않을 때는 VM을 중지합니다.
 
 | 요청 | Gateway 처리 |
 | --- | --- |
@@ -92,11 +92,10 @@ cloud-server 저장소에 Dockerfile이 없어 compose.yaml의 `dockerfile_inlin
 브라우저는 nginx를 거쳐 `ws://<주소>/ws`로 접속합니다. 인증 메시지 없이 접속 즉시 C 서버 /api/edge/status를 읽어
 edge.status를 보내고 C 서버 /ws에 연결합니다.
 Gateway가 15초마다 JSON heartbeat를 보내고 JSON ping에 응답합니다.
-C 서버의 sensor.update, device.state, edge.status, edge.recovered, command.ack를 중계하고,
+C 서버의 sensor.update, device.state, edge.status, edge.recovered, command.ack, forecast.update, recommendation.new를
+중계하고(SAD 10.3 ③, 그 밖의 type은 버림),
 알림이 생기면 Gateway가 직접 `notification.new`를 모든 연결에 보냅니다(FCM 없이도 웹에 표시).
 C 서버 소켓이 끊기면 브라우저 소켓을 닫아 재연결·REST 재동기화를 유도합니다.
-
-> SAD 10.3의 forecast.update, recommendation.new는 C 서버가 보내면 중계 목록에 추가해야 합니다(현재 미중계).
 
 ## 내부 알림 API (Cloud Server → Gateway)
 
@@ -140,17 +139,14 @@ tls = true
 
 ## 프론트 연동
 
-nginx가 웹과 API를 같은 주소로 제공하므로 프론트 빌드에는 같은 출처를 씁니다.
+E 담당 확인(백엔드 연동 요청 사항 D-3, 2026-11-18) 기준입니다.
 
-```dotenv
-VITE_ENABLE_MOCKS=false
-VITE_API_BASE_URL=
-VITE_WS_URL=
-```
+| 방식 | 설정 |
+| --- | --- |
+| Compose (nginx 80) | frontend에서 `npm ci && npm run build`만 하면 됩니다. `.env`가 없으면 운영 빌드는 목업이 꺼지고, `VITE_API_BASE_URL`·`VITE_WS_URL`이 비어 있어 접속한 주소의 /api와 /ws를 씁니다. 결과는 `WEB_DIST_DIR`(기본 ../frontend/dist)로 제공됩니다. |
+| Vite 개발 서버 (5173) | frontend에 `.env.development.local`: `VITE_ENABLE_MOCKS=false`, `VITE_API_BASE_URL=http://localhost`, `VITE_WS_URL=ws://localhost/ws`. `CORS_ORIGINS` 기본값에 5173이 포함되어 있습니다. |
 
-`VITE_API_BASE_URL`이 비면 같은 출처를 쓰는지, `VITE_WS_URL`을 `ws://<VM 주소>/ws`로 넣어야 하는지는 E 담당과 확인합니다.
-Vite 개발 서버(5173)로 붙일 때는 `VITE_API_BASE_URL=http://localhost`, `VITE_WS_URL=ws://localhost/ws`이고
-`CORS_ORIGINS`에 `http://localhost:5173`이 있어야 합니다.
+알림 목록에 `read` 필드는 없습니다. 프론트가 브라우저에서 "마지막으로 본 시각"으로 읽음 처리를 합니다.
 
 ## 알림 API
 
@@ -220,7 +216,7 @@ Prometheus는 `infra/prometheus/alerts.yml`의 규칙을 평가합니다.
 
 ### Alertmanager
 
-선택 항목입니다. SAD v1.2는 경보를 Prometheus 화면(http://127.0.0.1:9090/alerts)에서 확인하므로 기본 실행에는 없습니다.
+선택 항목입니다. SAD v1.3은 경보를 Prometheus 화면(http://127.0.0.1:9090/alerts)에서 확인하므로 기본 실행에는 없습니다.
 팀 채널 통지가 필요할 때 `docker compose --profile alerting up -d`로 켜며 UI는 http://127.0.0.1:9093입니다.
 꺼져 있는 동안 Prometheus 로그에 Alertmanager 연결 실패가 남는 것은 정상입니다.
 경보는 Slack 호환 Incoming Webhook으로 발생·해소를 모두 통지합니다(critical 1시간, warning 4시간마다 반복).

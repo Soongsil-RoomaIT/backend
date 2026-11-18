@@ -1,6 +1,6 @@
 # D 백엔드 인프라
 
-자취방 원격 케어 시스템(SAD v1.2)의 D 역할 저장소입니다. 클라우드 VM 1대의 Docker Compose로
+자취방 원격 케어 시스템(SAD v1.3)의 D 역할 저장소입니다. 클라우드 VM 1대의 Docker Compose로
 nginx, Node.js Gateway(`node-service`), Cloud Server(C), MQTT 브로커(Mosquitto), PostgreSQL, Redis, Prometheus를 함께 실행합니다.
 
 > **로그인 기능과 Keycloak은 사용하지 않습니다.** 웹은 인증 없이 Gateway를 사용하고 모든 요청은 방 사용자 한 명(`ROOM_USER_ID`)으로 처리됩니다.
@@ -46,10 +46,12 @@ node node-service/scripts/smoke-docker.js
 - [x] Grafana/Loki 대시보드와 로그 보존 정책 (선택 프로필)
 - [x] Alertmanager 경보 통지 (선택 프로필), Redis·C 서버 readiness 검사
 - [x] C 서버 연동 요청 반영: 기기 명령 `Idempotency-Key` 전달, `CLOUD_HEALTH_PATH=/health`
-- [ ] C 담당: 알림 연동을 `GATEWAY_INTERNAL_NOTIFICATIONS_URL` + `X-Internal-Key` 방식으로 변경, 사용자 JWT 검증 제거
+- [x] 백엔드 연동 요청 사항(E, 2026-11-18) D-1: WebSocket `forecast.update`·`recommendation.new` 중계
+- [x] D-2: CI 복구 (`npm audit fix`, 취약점 0)
+- [x] D-3: 프론트 답변 반영 — `.env` 없이 빌드하면 같은 출처 사용, 알림 `read`는 프론트가 처리 ([프론트 연동](docs/NODE_BACKEND.md#프론트-연동))
+- [x] E 담당: 로그인 화면 없이 같은 출처(nginx)로 빌드, `notification.new` 표시 (frontend PR #5)
+- [x] SAD v1.3: 웹 로그인 제거(ADR-019) 반영
+- [ ] C 담당 (요청 사항 C-1~C-4): 측정값 null 허용, v1.2 API 4종, 알림을 `GATEWAY_INTERNAL_NOTIFICATIONS_URL` + `X-Internal-Key`로 전송, 기기 초기값·상태 출처
 - [ ] A 담당: edge_agent에 MQTT CA 파일 옵션 추가(또는 Pi에 CA 등록), 계정 `room-001`·TLS 8883 사용
-- [ ] E 담당: 로그인 화면 없이 같은 출처(nginx)로 빌드, `notification.new` 표시
-- [ ] SAD v1.2 문서의 인증 부분(6.1, ADR-014, 10.3 `/api/auth/login`·WS auth) 수정 — 로그인 제거 반영
 - [ ] VM 확보와 방화벽(80, 8883만 허용), 과금 알림 설정
 - [ ] AI 학습 스크립트 (SAD 4.1, D 담당)
-- [ ] 알림 목록·읽음 API 계약을 C·E와 확정 (D: id/title/body/data/status, C: message/read/pushStatus)

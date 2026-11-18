@@ -64,7 +64,7 @@ test('REST works without login as the room user, forwards to C without identity 
   assert.equal((await fetch(base+'/api/edge/status',{headers})).status,502);
 });
 
-test('WS sends initial status, heartbeat/ping and forwards sensor/recovery frames', async t => {
+test('WS sends initial status, heartbeat/ping and forwards sensor/recovery/forecast/recommendation frames only', async t => {
   const state={online:true,offlineMode:false,lastSeenAt:new Date().toISOString()};
   const cloud=createServer((_req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify(state));});
   const upstream=new WebSocketServer({server:cloud,path:'/ws'});
@@ -73,6 +73,9 @@ test('WS sends initial status, heartbeat/ping and forwards sensor/recovery frame
   upstream.on('connection',ws=>{
     ws.send(JSON.stringify({type:'sensor.update',payload:{temperature:23,humidity:50,measuredAt:state.lastSeenAt}}));
     ws.send(JSON.stringify({type:'edge.recovered',payload:recovery}));
+    ws.send(JSON.stringify({type:'internal.debug',payload:{secret:true}}));
+    ws.send(JSON.stringify({type:'forecast.update',payload:{metrics:[]}}));
+    ws.send(JSON.stringify({type:'recommendation.new',payload:{id:'rec-1',status:'PROPOSED'}}));
   });
   const {server,wss}=createApp({config:{...config,cloud:cloudUrl},notifications:{},logger,registry:new Registry()});
   const base=await listen(server);
@@ -84,11 +87,13 @@ test('WS sends initial status, heartbeat/ping and forwards sensor/recovery frame
     client.on('message',raw=>{
       const msg=JSON.parse(raw.toString());frames.push(msg);
       if(msg.type==='edge.status')client.send(JSON.stringify({type:'ping'}));
-      if(['edge.status','sensor.update','edge.recovered','heartbeat'].every(type=>frames.some(f=>f.type===type)) && frames.filter(f=>f.type==='heartbeat').length >= 2){clearTimeout(timeout);resolve();}
+      if(['edge.status','sensor.update','edge.recovered','forecast.update','recommendation.new','heartbeat'].every(type=>frames.some(f=>f.type===type)) && frames.filter(f=>f.type==='heartbeat').length >= 2){clearTimeout(timeout);resolve();}
     });client.on('error',reject);
   });
   assert.deepEqual(frames[0],{type:'edge.status',payload:state});
   assert.deepEqual(frames.find(f=>f.type==='edge.recovered').payload,recovery);
+  assert.deepEqual(frames.find(f=>f.type==='recommendation.new').payload,{id:'rec-1',status:'PROPOSED'});
+  assert.ok(!frames.some(f=>f.type==='internal.debug'));
 });
 
 test('WS needs no auth message, sends no token upstream and rejects disallowed Origins', async t => {

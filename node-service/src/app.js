@@ -5,12 +5,15 @@ import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Counter, Gauge, Histogram } from 'prom-client';
-// Cloud Server routes in use (frontend, cloud-server) and planned in SAD v1.2 appendix 10.3.
+// Cloud Server routes in use (frontend, cloud-server) and planned in SAD v1.3 appendix 10.3.
 const API_SEGMENTS = new Set(['sensors', 'devices', 'edge', 'commands', 'forecast', 'decisions', 'settings',
   'notifications', 'outdoor', 'recommendations', 'automation']);
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
 // Command deduplication key generated per button press by the web app; C rejects live commands without it.
 const IDEMPOTENCY_KEY = /^[!-~]{1,200}$/;
+// Cloud Server WebSocket messages relayed to the browser (SAD v1.3 appendix 10.3 ③).
+const RELAYED_TYPES = new Set(['edge.status', 'sensor.update', 'device.state', 'edge.recovered', 'command.ack',
+  'forecast.update', 'recommendation.new']);
 
 // Bounded route label so arbitrary request paths cannot explode Prometheus cardinality.
 export function routeLabel(path) {
@@ -96,7 +99,7 @@ export function createApp({config, notifications, logger, registry, checks = {}}
   });
   app.use(rateLimit({windowMs: 60_000, limit: 120, standardHeaders: 'draft-8', legacyHeaders: false}));
   app.use(express.json({limit: '64kb'}));
-  // No user login (SAD v1.2 single household): every browser request belongs to the single room user.
+  // No user login (SAD v1.3 ADR-019): every browser request belongs to the single room user.
   const user = config.roomUser;
   app.post('/api/push/token', async (req, res) => {
     const token = req.body?.token;
@@ -196,7 +199,7 @@ export function createApp({config, notifications, logger, registry, checks = {}}
           if (binary || client.readyState !== WebSocket.OPEN) return;
           try {
             const message = JSON.parse(data.toString());
-            if (['edge.status','sensor.update','device.state','edge.recovered','command.ack'].includes(message.type)) client.send(data.toString());
+            if (RELAYED_TYPES.has(message.type)) client.send(data.toString());
           } catch { /* Ignore malformed upstream frames. */ }
         });
         upstream.on('error', () => { metrics.upstreamFailures.inc({transport: 'ws'}); client.close(1011, 'Cloud WebSocket unavailable'); });
