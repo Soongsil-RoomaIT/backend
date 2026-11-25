@@ -1,4 +1,4 @@
-# 자취방 원격 케어 시스템 클라우드 VM 구성 (SAD v1.2 ADR-016, 7.1)
+# 자취방 원격 케어 시스템 클라우드 VM 구성 (SAD v1.4 ADR-016, 7.1)
 # 외부 공개 포트는 nginx 80(웹·API)과 Mosquitto 8883(MQTT TLS)뿐입니다.
 # Gateway·Cloud Server·PostgreSQL·Redis는 Compose 내부망에만 있고, Prometheus는 127.0.0.1에만 엽니다.
 # backend, cloud-server, frontend 저장소를 같은 폴더에 나란히 둡니다(경로는 .env로 바꿀 수 있음).
@@ -171,7 +171,7 @@ services:
       - gateway-service
 
   # ---- alerting 프로필(선택): docker compose --profile alerting up ----
-  # SAD v1.2는 경보를 Prometheus 화면에서 확인합니다. 팀 채널 통지가 필요할 때만 켭니다.
+  # SAD v1.4는 경보를 Prometheus 화면에서 확인합니다. 팀 채널 통지가 필요할 때만 켭니다.
   alertmanager:
     logging: *default-logging
     restart: unless-stopped

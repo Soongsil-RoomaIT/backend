@@ -1,4 +1,4 @@
-# D 백엔드 인프라 (SAD v1.3)
+# D 백엔드 인프라 (SAD v1.4)
 
 클라우드 VM 1대의 Docker Compose로 nginx, Node.js Gateway, Cloud Server(C), MQTT 브로커,
 PostgreSQL, Redis, Prometheus를 함께 실행합니다(ADR-013, ADR-016).
@@ -83,7 +83,7 @@ sudo docker run --rm --network host -e COMPOSE_PROJECT_NAME=backend -v "$PWD":/w
 
 ## 인증 정책 (로그인 없음)
 
-1인 자취방 시스템이라 웹 앱에는 로그인 화면이 없습니다(SAD v1.3 6.1, ADR-019). 주소는 팀 내부에만 공유하고 쓰지 않을 때는 VM을 중지합니다.
+1인 자취방 시스템이라 웹 앱에는 로그인 화면이 없습니다(SAD v1.4 6.1, ADR-019). 주소는 팀 내부에만 공유하고 쓰지 않을 때는 VM을 중지합니다.
 
 | 요청 | Gateway 처리 |
 | --- | --- |
@@ -125,6 +125,8 @@ C 서버의 sensor.update, device.state, edge.status, edge.recovered, command.ac
 중계하고(SAD 10.3 ③, 그 밖의 type은 버림),
 알림이 생기면 Gateway가 직접 `notification.new`를 모든 연결에 보냅니다(FCM 없이도 웹에 표시).
 C 서버 소켓이 끊기면 브라우저 소켓을 닫아 재연결·REST 재동기화를 유도합니다.
+메시지 내용(payload)은 검사하거나 바꾸지 않고 그대로 넘깁니다. 그래서 SAD v1.4에서 측정값에 추가된
+`gasDetected`(MQ-2 유해가스 감지 여부, ADR-020) 같은 필드도 C 서버가 보내면 Gateway 수정 없이 웹에 전달됩니다.
 
 ## 내부 알림 API (Cloud Server → Gateway)
 
@@ -139,6 +141,12 @@ curl -X POST http://gateway-service:8080/internal/notifications \
 - 본문은 `eventId`, `title`, `body`(문자열, 각 4096자 이하)와 선택 `data`(값이 모두 문자열인 객체)입니다. 받는 사람은 항상 방 사용자입니다.
 - `eventId`가 같으면 24시간 동안 한 번만 처리하고 `{"status":"duplicate"}`를 돌려줍니다. 재시도할 때 같은 eventId를 씁니다.
 - 응답 `status`: sent / dry-run / partial-failure / no-targets / duplicate. 서버 오류는 503이며 재시도할 수 있습니다.
+- `data.type`은 웹 알림 아이콘을 고르는 데 쓰입니다(`device.*`, `edge.recovered`, `prediction.*`, `recommendation.*`).
+  SAD v1.4의 유해가스 감지 알림(ADR-020)은 `gas.detected` / `gas.cleared`를 쓰도록 C·E와 맞춥니다.
+
+  ```json
+  {"eventId":"gas-1795000000","title":"유해가스 감지","body":"창문을 열었습니다","data":{"type":"gas.detected","deviceId":"window-1"}}
+  ```
 - Compose는 cloud-server 컨테이너에 `GATEWAY_INTERNAL_NOTIFICATIONS_URL`과 `INTERNAL_API_KEY`를 넣어 둡니다.
   **현재 C 서버의 알림 연동 코드는 이전 방식(Keycloak 서비스 계정)이므로 C 담당이 이 방식으로 바꿔야 합니다.**
   C의 `NOTIFICATION_SEND_URL` 등 이전 변수는 설정하지 않습니다(설정하면 C 서버가 시작을 거부합니다).
@@ -260,7 +268,7 @@ Prometheus는 `infra/prometheus/alerts.yml`의 규칙을 평가합니다.
 
 ### Alertmanager
 
-선택 항목입니다. SAD v1.3은 경보를 Prometheus 화면(http://127.0.0.1:9090/alerts)에서 확인하므로 기본 실행에는 없습니다.
+선택 항목입니다. SAD v1.4는 경보를 Prometheus 화면(http://127.0.0.1:9090/alerts)에서 확인하므로 기본 실행에는 없습니다.
 팀 채널 통지가 필요할 때 `docker compose --profile alerting up -d`로 켜며 UI는 http://127.0.0.1:9093입니다.
 꺼져 있는 동안 Prometheus 로그에 Alertmanager 연결 실패가 남는 것은 정상입니다.
 경보는 Slack 호환 Incoming Webhook으로 발생·해소를 모두 통지합니다(critical 1시간, warning 4시간마다 반복).

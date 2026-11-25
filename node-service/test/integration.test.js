@@ -70,8 +70,10 @@ test('WS sends initial status, heartbeat/ping and forwards sensor/recovery/forec
   const upstream=new WebSocketServer({server:cloud,path:'/ws'});
   const cloudUrl=await listen(cloud);
   const recovery={offlineSince:new Date().toISOString(),recoveredAt:new Date().toISOString(),localActions:[]};
+  // SAD v1.4: humidity/temperature only, CO2·PM null, MQ-2 gas detection flag (ADR-008, ADR-020).
+  const sensor={measuredAt:state.lastSeenAt,temperature:23,humidity:50,co2:null,pm25:null,pm10:null,gasDetected:true};
   upstream.on('connection',ws=>{
-    ws.send(JSON.stringify({type:'sensor.update',payload:{temperature:23,humidity:50,measuredAt:state.lastSeenAt}}));
+    ws.send(JSON.stringify({type:'sensor.update',payload:sensor}));
     ws.send(JSON.stringify({type:'edge.recovered',payload:recovery}));
     ws.send(JSON.stringify({type:'internal.debug',payload:{secret:true}}));
     ws.send(JSON.stringify({type:'forecast.update',payload:{metrics:[]}}));
@@ -93,6 +95,7 @@ test('WS sends initial status, heartbeat/ping and forwards sensor/recovery/forec
   assert.deepEqual(frames[0],{type:'edge.status',payload:state});
   assert.deepEqual(frames.find(f=>f.type==='edge.recovered').payload,recovery);
   assert.deepEqual(frames.find(f=>f.type==='recommendation.new').payload,{id:'rec-1',status:'PROPOSED'});
+  assert.deepEqual(frames.find(f=>f.type==='sensor.update').payload,sensor);
   assert.ok(!frames.some(f=>f.type==='internal.debug'));
 });
 

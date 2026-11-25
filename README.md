@@ -1,6 +1,6 @@
 # D 백엔드 인프라
 
-자취방 원격 케어 시스템(SAD v1.3)의 D 역할 저장소입니다. 클라우드 VM 1대의 Docker Compose로
+자취방 원격 케어 시스템(SAD v1.4)의 D 역할 저장소입니다. 클라우드 VM 1대의 Docker Compose로
 nginx, Node.js Gateway(`node-service`), Cloud Server(C), MQTT 브로커(Mosquitto), PostgreSQL, Redis, Prometheus를 함께 실행합니다.
 
 > **로그인 기능과 Keycloak은 사용하지 않습니다.** 웹은 인증 없이 Gateway를 사용하고 모든 요청은 방 사용자 한 명(`ROOM_USER_ID`)으로 처리됩니다.
@@ -51,7 +51,9 @@ node node-service/scripts/smoke-docker.js
 - [x] D-3: 프론트 답변 반영 — `.env` 없이 빌드하면 같은 출처 사용, 알림 `read`는 프론트가 처리 ([프론트 연동](docs/NODE_BACKEND.md#프론트-연동))
 - [x] E 담당: 로그인 화면 없이 같은 출처(nginx)로 빌드, `notification.new` 표시 (frontend PR #5)
 - [x] SAD v1.3: 웹 로그인 제거(ADR-019) 반영
-- [ ] C 담당 (요청 사항 C-1~C-4): 측정값 null 허용, v1.2 API 4종, 알림을 `GATEWAY_INTERNAL_NOTIFICATIONS_URL` + `X-Internal-Key`로 전송, 기기 초기값·상태 출처
+- [x] C 담당 (요청 사항 C-1~C-4): 측정값 null 허용, v1.2 API 4종, 알림을 `GATEWAY_INTERNAL_NOTIFICATIONS_URL` + `X-Internal-Key`로 전송, 기기 초기값·상태 출처
+- [x] SAD v1.4 반영: 창문·가전 LED, MC-38, 엣지 10분 타이머, 환경 데이터 기반 AI 추천, MQ-2 유해가스(`gasDetected`는 Gateway가 그대로 전달, 알림 `data.type` `gas.*`)
+- [ ] SAD v1.4 연동 요청 사항(A·B·C·E) 처리 확인 — 프로젝트 폴더의 `연동_요청사항_SAD_v1.4.docx`
 - [ ] A 담당: edge_agent에 MQTT CA 파일 옵션 추가(또는 Pi에 CA 등록), 계정 `room-001`·TLS 8883 사용
 - [x] VM 확보와 방화벽(80, 8883만 허용), 과금 알림 설정 — Azure for Students Korea Central B2ls_v2 ([VM 배포](docs/NODE_BACKEND.md#azure-vm-배포-2026-11-18-구성))
 - [ ] AI 학습 스크립트 (SAD 4.1, D 담당)
