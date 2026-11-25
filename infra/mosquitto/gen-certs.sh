@@ -32,3 +32,4 @@ rm -f "$out/server.csr" "$out/server.ext" "$out/ca.srl"
 # The broker runs as the mosquitto user inside the container and must be able to read the key.
 chmod 644 "$out/server.key"
 echo "Created $out/ca.crt and $out/server.crt (SAN: $san)"
+echo "If this is the team VM, replace infra/mosquitto/vm-ca.crt with $out/ca.crt and commit it (never commit the .key files)."

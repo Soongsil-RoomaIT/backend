@@ -150,21 +150,36 @@ curl -X POST http://gateway-service:8080/internal/notifications \
 - ACL([infra/mosquitto/acl](../infra/mosquitto/acl)): 엣지 계정은 `roomcare/{자기 deviceId}/#`만, cloud-server는 `roomcare/#`.
 - 8883은 TLS 전용(자체 서명 CA), 1883 평문은 Compose 내부망의 cloud-server만 사용하며 호스트에 공개하지 않습니다.
 - `gen-certs.sh`는 `secrets/mosquitto/`에 ca.crt·ca.key·server.crt·server.key를 만듭니다. VM 주소가 바뀌면 `FORCE=1`로 다시 만듭니다.
+- 팀 VM의 CA 인증서는 [infra/mosquitto/vm-ca.crt](../infra/mosquitto/vm-ca.crt)에 공개합니다(공개 인증서라 저장소에 둬도 됨).
+  **VM에서 인증서를 다시 만들면 이 파일도 VM의 `secrets/mosquitto/ca.crt`로 바꿔 커밋해야 합니다.** ca.key·server.key는 절대 올리지 않습니다.
 
-라즈베리파이(edge_agent) `config.toml` 예:
+### 라즈베리파이 연결 (A 담당)
 
-```toml
-[mqtt]
-host = "VM 공인 IP"
-port = 8883
-username = "room-001"          # EDGE_DEVICE_ID
-password = "MQTT_EDGE_PASSWORD 값"
-tls = true
-```
+1. 팀 VM의 CA 인증서를 받아 시스템에 등록합니다. 현재 edge_agent는 `tls = true`일 때 시스템 CA만 신뢰합니다.
 
-라즈베리파이에는 `secrets/mosquitto/ca.crt`만 복사합니다(ca.key·server.key는 공유하지 않음).
-현재 edge_agent는 `tls = true`일 때 시스템 CA만 신뢰하므로, A 담당이 CA 파일 경로 옵션을 추가하거나
-`sudo cp ca.crt /usr/local/share/ca-certificates/roomcare-mqtt.crt && sudo update-ca-certificates`로 등록합니다.
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/Soongsil-RoomaIT/backend/main/infra/mosquitto/vm-ca.crt -o ~/ca.crt
+   sudo cp ~/ca.crt /usr/local/share/ca-certificates/roomcare-mqtt.crt && sudo update-ca-certificates
+   ```
+
+2. edge_agent `config/config.toml`을 고칩니다. `username`은 `device_id`와 같아야 합니다(ACL).
+   비밀번호는 VM `.env`의 `MQTT_EDGE_PASSWORD`이며 D 담당에게 따로 받습니다(저장소·단톡방에 올리지 않음).
+
+   ```toml
+   device_id = "room-001"
+
+   [mqtt]
+   host = "20.196.200.47"         # 팀 VM 공인 IP
+   port = 8883
+   username = "room-001"          # EDGE_DEVICE_ID
+   password = "MQTT_EDGE_PASSWORD 값"
+   tls = true
+   keepalive = 4
+   topic_prefix = "roomcare"
+   ```
+
+3. `sudo systemctl restart edge-agent && journalctl -u edge-agent -f`로 다시 시작하고,
+   http://20.196.200.47 오른쪽 위가 "기기 연결됨"인지 확인합니다. VM은 평소 꺼 두므로 시험 전에 D 담당에게 켜 달라고 합니다.
 
 ## 프론트 연동
 
