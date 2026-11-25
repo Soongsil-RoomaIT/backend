@@ -75,6 +75,7 @@ sudo docker run --rm --network host -e COMPOSE_PROJECT_NAME=backend -v "$PWD":/w
 ```
 
 업데이트는 각 저장소에서 `git pull` 후 같은 빌드·`docker compose up -d --build`를 다시 실행합니다(웹이 바뀌었으면 nginx 재시작).
+모든 서비스는 `restart: unless-stopped`라 VM을 껐다 켜면(`az vm start`) 1~2분 안에 자동으로 다시 뜹니다.
 라즈베리파이용 `ca.crt`는 VM의 `secrets/mosquitto/ca.crt`, 엣지 비밀번호는 VM `.env`의 `MQTT_EDGE_PASSWORD`입니다.
 
 `smoke-docker.js`는 nginx(80)를 거친 공개 경로와, Gateway 컨테이너 안에서 내부 경로(/internal, /actuator)를 검증합니다.
